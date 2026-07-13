@@ -1,0 +1,25 @@
+track: target_comparison
+method: deepall
+seed: 0
+target_angle: 0
+data_budget: 1.0
+data_root: data
+results_root: results
+dataset_seed: 2024
+angles: [0, 15, 30, 45, 60, 75]
+batch_per_domain: 12
+epochs: 100
+num_workers: 4
+device: auto
+deterministic: true
+optimizer:
+  name: sgd
+  lr: 0.001
+  momentum: 0.9
+  weight_decay: 0.001
+loss:
+  dger_alpha_1: 0.5
+  dger_alpha_2: 0.005
+  dger_alpha_3: 0.01
+  interpolation_lambda: 1.0
+  interpolation_weights: [0.0, 0.25, 0.5, 0.75, 1.0]

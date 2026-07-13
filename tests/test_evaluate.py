@@ -1,0 +1,18 @@
+import json
+
+import yaml
+
+from evaluate import aggregate_results
+
+
+def test_aggregation_reports_per_angle_and_seed_level_overall_metrics(tmp_path):
+    for seed, values in ((0, (0.8, 0.7)), (1, (0.6, 0.5))):
+        for angle, accuracy in zip((0, 15), values):
+            run = tmp_path / f"run_{seed}_{angle}"
+            run.mkdir()
+            (run / "resolved_config.yaml").write_text(yaml.safe_dump({"method": "deepall", "data_budget": 1.0, "target_angle": angle, "seed": seed}))
+            (run / "final_metrics.json").write_text(json.dumps({"target": {"accuracy": accuracy, "cross_entropy": 1 - accuracy, "mean_per_class_accuracy": accuracy}}))
+    report = aggregate_results(tmp_path)
+    assert report["per_angle"]["deepall/budget_1.0/target_0"]["accuracy"]["mean"] == 0.7
+    assert report["overall_across_angles"]["deepall/budget_1.0"]["accuracy"]["mean"] == 0.65
+    assert report["paper_reference_accuracy_percent"]["deepall/budget_1.0"] == 92.69
