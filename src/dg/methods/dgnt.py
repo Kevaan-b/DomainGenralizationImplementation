@@ -9,12 +9,12 @@ from torch import Tensor
 
 from ..models.interpolator import LatentInterpolator
 from ..training.losses import interpolation_loss
-from .dger import DGER
+from .dger import DGER, TensorBatch, _set_grad
 
 
 class DGNT(DGER):
-    def __init__(self, num_domains: int, optimizer_kwargs: dict[str, object], alpha_1: float = .5, alpha_2: float = .005, alpha_3: float = .01, interpolation_lambda: float = 1., weights: Iterable[float] = (0., .25, .5, .75, 1.), auxiliary_lr: float | None = None) -> None:
-        super().__init__(num_domains, optimizer_kwargs, alpha_1, alpha_2, alpha_3, auxiliary_lr)
+    def __init__(self, num_domains: int, optimizer_kwargs: dict[str, object], alpha_1: float = .5, alpha_2: float = .005, alpha_3: float = .01, interpolation_lambda: float = 1., weights: Iterable[float] = (0., .25, .5, .75, 1.), auxiliary_lr: float | None = None, domain_reduction: str = "sum") -> None:
+        super().__init__(num_domains, optimizer_kwargs, alpha_1, alpha_2, alpha_3, auxiliary_lr, domain_reduction)
         self.interpolator = LatentInterpolator()
         primary_parameters = list(self.network.parameters()) + list(self.auxiliaries.discriminator.parameters()) + list(self.interpolator.parameters())
         entropy_parameters = list(self.auxiliaries.entropy_heads.parameters())
@@ -24,11 +24,33 @@ class DGNT(DGER):
         self.main_optimizer = torch.optim.SGD(main_groups, **optimizer_kwargs)
         self.interpolation_lambda, self.weights = interpolation_lambda, tuple(weights)
 
+    def _primary_additional_loss(
+        self, pair_batch: TensorBatch | None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Add DNT to DGER's joint F/T/D phase without touching auxiliaries."""
+        if pair_batch is None:
+            raise ValueError("DGNT needs a same-class cross-domain pair batch.")
+        _set_grad(self.interpolator, True)
+        start = self.network.encoder(pair_batch["left_image"])
+        end = self.network.encoder(pair_batch["right_image"])
+        interpolation = interpolation_loss(
+            self.network.classifier, start, end, pair_batch["label"],
+            self.interpolator, self.weights,
+        )
+        weighted = self.interpolation_lambda * interpolation.total
+        return weighted, {
+            "weighted_interpolation_loss": weighted,
+            "interpolation_loss": interpolation.total,
+            "path_loss": interpolation.path,
+            "endpoint_loss": interpolation.endpoint,
+        }
+
     def train_step(self, batch: Mapping[str, Tensor], pair_batch: Mapping[str, Tensor] | None = None) -> dict[str, float]:
         if pair_batch is None:
             raise ValueError("DGNT needs a same-class cross-domain pair batch.")
         stabilizer = self._train_stabilizers(batch["image"], batch["label"], batch["domain"])
         dger_total, components, logits = self._main_loss(batch["image"], batch["label"], batch["domain"])
+        _set_grad(self.interpolator, True)
         start = self.network(pair_batch["left_image"]).features
         end = self.network(pair_batch["right_image"]).features
         interpolation = interpolation_loss(self.network.classifier, start, end, pair_batch["label"], self.interpolator, self.weights)

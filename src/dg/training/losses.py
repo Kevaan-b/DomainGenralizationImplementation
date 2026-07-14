@@ -21,7 +21,11 @@ def interpolation_path(start: Tensor, displacement: Tensor, weights: Iterable[fl
 
 
 def endpoint_loss(displacement: Tensor, expected_displacement: Tensor) -> Tensor:
-    return functional.mse_loss(displacement, expected_displacement)
+    """Equation 4's expected Euclidean endpoint error."""
+    error = displacement - expected_displacement
+    if error.ndim < 2:
+        raise ValueError("Endpoint displacements must include batch and feature dimensions.")
+    return torch.linalg.vector_norm(error.flatten(start_dim=1), ord=2, dim=1).mean()
 
 
 def interpolation_loss(

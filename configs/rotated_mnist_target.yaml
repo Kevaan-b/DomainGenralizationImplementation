@@ -7,8 +7,11 @@ data_root: data
 results_root: results
 dataset_seed: 2024
 angles: [0, 15, 30, 45, 60, 75]
-batch_per_domain: 12
+batch_size: 64
+pair_batch_size: 64
+dger_domain_batch_size: 12
 epochs: 100
+update_schedule: method_faithful
 num_workers: 4
 device: auto
 deterministic: true
@@ -22,4 +25,5 @@ loss:
   dger_alpha_2: 0.005
   dger_alpha_3: 0.01
   interpolation_lambda: 1.0
+  interpolation_policy: uniform_grid
   interpolation_weights: [0.0, 0.25, 0.5, 0.75, 1.0]

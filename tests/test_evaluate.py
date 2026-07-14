@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import yaml
 
 from evaluate import aggregate_results
@@ -16,3 +17,7 @@ def test_aggregation_reports_per_angle_and_seed_level_overall_metrics(tmp_path):
     assert report["per_angle"]["deepall/budget_1.0/target_0"]["accuracy"]["mean"] == 0.7
     assert report["overall_across_angles"]["deepall/budget_1.0"]["accuracy"]["mean"] == 0.65
     assert report["paper_reference_accuracy_percent"]["deepall/budget_1.0"] == 92.69
+    assert report["paper_matrix_complete"]["deepall/budget_1.0"] is False
+
+    with pytest.raises(ValueError, match="six target angles and exactly five seeds"):
+        aggregate_results(tmp_path, require_paper_matrix=True)

@@ -640,7 +640,7 @@ $w=1$. The endpoint-consistency penalty is:
 
 $$
 \mathcal{L}_{\mathrm{end}}
-=\left\|T_\psi(z'-z)-(z'-z)\right\|_2^2.
+=\left\|T_\psi(z'-z)-(z'-z)\right\|_2.
 $$
 
 When $T_\psi$ is the identity, the method reduces to linear interpolation.
@@ -655,7 +655,7 @@ $$
 =\mathbb{E}_{d,d',x,x',y,w}
 \left[
 \ell\left(C_\theta(\hat z(w)),y\right)
-+\left\|T_\psi(z'-z)-(z'-z)\right\|_2^2
++\left\|T_\psi(z'-z)-(z'-z)\right\|_2
 \right].
 $$
 
@@ -691,7 +691,7 @@ for each training epoch:
 
     L_cls = sum_i cross_entropy(C_theta(z_i), y_i)
     L_int = sum_i,w cross_entropy(C_theta(z_hat_i(w)), y_i)
-            + squared_l2(delta_i - (z'_i - z_i))
+            + l2_norm(delta_i - (z'_i - z_i))
     L_dnt = L_cls + lambda * L_int
 
     update theta, phi, and psi by gradient descent on L_dnt
@@ -758,8 +758,8 @@ For every source minibatch:
     compute the base method's classification loss
     compute the base method's invariant-representation losses
 
-    independently sample same-class, cross-domain pairs
-    encode the pair and construct latent interpolation points
+    pair the left minibatch with same-class examples from other domains
+    encode both endpoint batches and construct latent interpolation points
     compute L_int and endpoint consistency
 
     combine losses according to:

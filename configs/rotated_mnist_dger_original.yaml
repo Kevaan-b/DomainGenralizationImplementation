@@ -9,6 +9,10 @@ dataset_seed: 2024
 angles: [0, 15, 30, 45, 60, 75]
 batch_per_domain: 12
 iterations: 3000
+update_schedule: algorithm_1
+source_validation_fraction: 0.0
+checkpoint_selection: final_iteration
+checkpoint_interval: 100
 num_workers: 4
 device: auto
 deterministic: true

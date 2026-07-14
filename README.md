@@ -14,11 +14,19 @@ experiment.
   domain is generated from the same deterministic 1,000-image, 100-per-class
   MNIST subset; the selected indices and exact rotation policy are stored next
   to the cache.
-- Leave-one-angle-out folds with source-only stratified 90/10 validation,
-  proportional data budgets, and domain-balanced batches (12 samples from
-  each of five source domains, hence an effective batch of 60).
-- Fixed five-point DNT path (`0, .25, .5, .75, 1`) and endpoint consistency.
-  DGER retains its separate stabilizer fit and GRL-based adversarial update.
+- The comparison track uses leave-one-angle-out folds with source-only
+  stratified 90/10 validation, proportional data budgets, and exact 64-item
+  near-balanced batches (13/13/13/13/12, rotating the short source). DNT and
+  DGNT use 64 same-class, cross-domain pairs. The original-DGER track trains on all
+  1,000 examples per source domain and has no validation holdout.
+- A documented five-point uniform DNT path (`0, .25, .5, .75, 1`), mean L2
+  endpoint consistency, and the reported three-layer convolutional interpolator.
+  The paper does not report the path-point count or convolution dimensions.
+  DGNT adds interpolation to the first DGER phase and preserves the subsequent
+  alternating auxiliary phases; its standalone DGER baseline uses those same
+  phases and differs only by the interpolation term/network.
+  The original-DGER reconstruction follows Algorithm 1's alternating per-domain updates with
+  fresh samples and explicit frozen-parameter boundaries.
 - CUDA is selected automatically when available. Pass `device: cuda` to fail
   rather than fall back to CPU; deterministic-kernel settings and GPU/version
   metadata are recorded in every run.
@@ -48,8 +56,9 @@ PYTHONPATH=src python3 src/run_experiment.py \
   --method deepall --target-angle 0 --seed 0
 ```
 
-For the original-DGER-fidelity update schedule (3,000 iterations, separate
-auxiliary learning rate):
+For the Algorithm-1-aligned DGER reconstruction (3,000 complete Algorithm 1
+iterations, separate auxiliary learning rate, and declared final-iteration
+selection policy):
 
 ```bash
 PYTHONPATH=src python3 src/run_experiment.py \
@@ -61,7 +70,7 @@ gradient reversal, class-stratified budgeting, pair constraints, and
 interpolation gradients. After runs finish, aggregate target analysis metrics:
 
 ```bash
-PYTHONPATH=src python3 src/evaluate.py results
+PYTHONPATH=src python3 src/evaluate.py results --require-paper-matrix
 ```
 
 The target-comparison CLI accepts `--method`, `--target-angle`, `--seed`, and
@@ -72,10 +81,11 @@ keep.
 
 ## Run artifacts and evaluation policy
 
-Each run records its input and resolved YAML configurations, environment and
-git metadata, per-epoch JSONL losses, source validation per angle, target
-metrics explicitly marked analysis-only, `last.pt`, and a
-`best_source_val.pt` selected exclusively by macro source-validation accuracy.
+Comparison runs record per-epoch losses, source validation per angle, `last.pt`,
+and `best_source_val.pt` selected exclusively by macro source-validation
+accuracy. The original-DGER track records per-iteration losses, periodically
+updates `last.pt`, writes `paper_final.pt` at iteration 3,000, and evaluates the
+target once from that final state.
 Checkpoint RNG states and all active optimizer states are retained. At
 inference, `predict` uses only the encoder and main classifier; DGER/DGNT
 discard their discriminator and auxiliary heads, and DNT/DGNT discard the

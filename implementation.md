@@ -41,15 +41,16 @@ optimizer:       SGD
 learning rate:   0.001
 momentum:        0.9
 weight decay:    0.001
-effective batch: 60 source examples
+minibatch:       64 source examples (64 pairs for DNT/DGNT)
 epochs:          100
 latent size:     64
 seeds:           5
 ```
 
-The effective batch is 60 because five domains do not divide evenly into the
-paper's reported batch size of 64. Use 12 examples per source domain per step.
-This is a fairness reconstruction; record it in every run manifest.
+Allocate ordinary 64-item batches as 13/13/13/13/12 across the five source
+domains and rotate the 12-item source. Domain balancing is a documented
+reconstruction because the paper reports only the total batch size. Algorithm
+1 treats DNT's batch size as 64 paired items (128 endpoint images).
 
 Loss weights:
 
@@ -63,7 +64,7 @@ DNT/DGNT lambda = 1.0
 The target supplement reports $\lambda=1$ for DNT and DGNT at every
 RotatedMNIST data budget.
 
-### 2.2 Track B: original-DGER fidelity check
+### 2.2 Track B: Algorithm-1-aligned DGER reconstruction
 
 Run DGER separately using the original RotatedMNIST settings reported by Zhao
 et al.:
@@ -79,7 +80,11 @@ alpha_3:                  0.01
 
 This is a DGER sanity check, not a controlled comparison with Track A. The
 official DGER repository contains PACS code but no RotatedMNIST implementation,
-so this track adapts its verified update logic to the shared MNIST CNN.
+so this track implements Algorithm 1 explicitly on the shared MNIST CNN. It uses all
+1,000 examples in every source domain, performs 3,000 complete outer Algorithm
+1 iterations, and evaluates the final iteration without validation selection.
+The last-checkpoint policy is a declared reconstruction choice because the paper
+does not state a validation or model-selection procedure.
 
 ## 3. Suggested project layout
 
@@ -288,19 +293,19 @@ $T'_i$. Stabilizers $T_i$ do not use gradient reversal.
 ### 5.2 DNT interpolator
 
 The target paper describes $T_\psi$ as a three-layer convolutional network,
-although its input is a latent vector. Use this vector-compatible reconstruction
-for the primary experiment:
+although its input is a latent vector. Treat the vector as a one-channel
+length-64 signal in this documented reconstruction:
 
 ```text
-Linear(64, 64)
+Conv1d(1, 64, kernel_size=3, padding=1)
 ReLU
-Linear(64, 64)
+Conv1d(64, 64, kernel_size=3, padding=1)
 ReLU
-Linear(64, 64)
+Conv1d(64, 1, kernel_size=3, padding=1)
 ```
 
-Keep the input/output shape `[batch, 64]`. A 1D-convolution implementation may
-be added as an architectural ablation, not substituted silently.
+Keep the input/output shape `[batch, 64]`. The channels and kernel are not
+reported by the paper and must not be presented as paper-specified choices.
 
 ## 6. Shared training, validation, and checkpoints
 
@@ -313,7 +318,7 @@ optimizer:       SGD
 learning rate:   0.001
 momentum:        0.9
 weight decay:    0.001
-effective batch: 60
+minibatch:       64
 epochs:          100
 ```
 
@@ -322,12 +327,11 @@ do not specify a RotatedMNIST scheduler; scheduler use is a later ablation.
 
 ### 6.2 Balanced source sampler
 
-Each training step draws 12 examples from each of the five source domains.
-Define one epoch as the length of the longest source loader; restart shorter
-domain iterators when they exhaust. This matches the official DGER loader
-behavior while giving all methods the same domain-balanced data exposure.
-
-The DNT pair sampler is independent of this ordinary classification batch.
+Each ordinary batch contains 64 examples allocated near-equally across the
+five sources; the short source rotates. Define an epoch as
+`ceil(total_source_train_examples / 64)` steps and cycle exhausted sources.
+DNT/DGNT pair the exact left minibatch with same-label examples from different
+source domains, so classification and interpolation share the left endpoints.
 
 ### 6.3 Model selection
 
@@ -401,12 +405,14 @@ Precompute:
 bucket[(domain_id, class_id)] -> sample indices
 ```
 
-For each pair:
+For each left example $(x,y,d)$ in the near-balanced 64-item minibatch:
 
-1. Sample a class uniformly from 0 through 9.
-2. Sample a source domain $d$.
-3. Sample a different source domain $d'$.
-4. Sample $x$ from bucket $(d,y)$ and $x'$ from bucket $(d',y)$.
+1. Select a different source domain $d'$ containing class $y$.
+2. Sample $x'$ from bucket $(d',y)$.
+
+This preserves Algorithm 1's use of the left paired batch for
+$\mathcal{L}_{\mathrm{cls}}$. Uniform-class pair sampling remains available
+only as a utility/ablation and is not the primary target-paper route.
 
 The pair must satisfy:
 
@@ -459,7 +465,7 @@ $$
 
 $$
 \mathcal{L}_{\mathrm{end}}
-=\left\|T_\psi(z'-z)-(z'-z)\right\|_2^2,
+=\mathbb{E}_i\left\|T_\psi(z'_i-z_i)-(z'_i-z_i)\right\|_2,
 $$
 
 $$
@@ -488,7 +494,7 @@ for epoch in 1..100:
         for w in [0, .25, .5, .75, 1]:
             L_path += CE(C(z + w * delta), y) / 5
 
-        L_end = MSE(delta, z_prime - z)
+        L_end = mean_i L2_norm(delta_i - (z_prime_i - z_i))
         L = L_cls + L_path + L_end
         update E, C, and T_psi
 
@@ -530,65 +536,45 @@ L_er:  entropy/GRL classifier losses T'_i
 L_cel: stabilizing own-domain/cross-domain classifier losses T_i
 ```
 
-Use class-balanced auxiliary losses and inverse domain-size weighting for the
-domain discriminator. With equal RotatedMNIST domain sizes, domain weighting is
-uniform, but implement the weighting generically.
+Track A retains class-balanced auxiliary losses and inverse domain-size domain
+weighting as comparison-policy reconstruction choices. Track B uses ordinary
+mean cross-entropy within each sampled source-domain batch and sums the domain
+expectations exactly as written in Eqs. 1, 2, 7, and 9.
 
-### 9.2 DGER update order
+### 9.2 Algorithm 1 DGER update order
 
-For a composite batch containing 12 examples from every source domain:
-
-#### Phase A: train stabilizers
-
-```text
-freeze F, T, D, and T'_i
-enable T_i
-compute z_detached = stop_gradient(F(x))
-for every source domain i:
-    select examples with domain == i
-    update T_i using class-balanced CE on its own-domain features
-```
-
-#### Phase B: train main DGER system
+Track B performs the alternating updates in Algorithm 1. For five source
+domains, one outer iteration contains 16 optimizer steps, 11 of which update
+the feature extractor:
 
 ```text
-enable F, T, D, and T'_i
-freeze T_i
+sample one fresh batch from every source domain
+update F, T, D on L_cls + alpha_1 * L_adv
 
-z, main_logits = F_T(x)
-L_cls = CE(main_logits, y)
-L_adv = CE(D(GRL(z)), domain)
-L_er  = sum_i CE(T'_i(GRL(z_i)), y_i)
-L_cel = sum_i CE(T_i(z_not_i), y_not_i)
+for i in 1..5:
+    sample a fresh own-domain batch B_i
+    freeze F; update only T_i on alpha_3 * CE(T_i(F_bar(B_i)))
+    update only F and T'_i on alpha_2 * CE(T'_i(GRL(F(B_i))))
 
-L = L_cls + .5*L_adv + .005*L_er + .01*L_cel
-update F, T, D, and T'_i
+    sample a fresh batch B_j for every j != i
+    freeze T_i; update only F on
+        alpha_3 * sum_j CE(T_i(F(B_j)))
 ```
 
-The stabilizer $T_i$ is frozen during the cross-domain feature update. The
-domain discriminator and $T'_i$ use GRL; $T_i$ does not.
+The domain discriminator and $T'_i$ use gradient reversal; $T_i$ never does.
+Before every substep, gradients are cleared and all nonparticipants are frozen,
+so momentum and weight decay cannot move inactive modules.
 
-### 9.3 DGER pseudocode
+### 9.3 Comparison-track DGER schedule
 
-```text
-initialize F, T, D, T_1..T_5, and T'_1..T'_5
-
-for epoch in 1..100:
-    for balanced source batch:
-        freeze F
-        z_detached = stop_gradient(F(x))
-        for i in 1..5:
-            update T_i on own-domain examples
-
-        freeze T_i
-        z, logits = F_T(x)
-        compute L_cls, L_adv, L_er, and L_cel
-        L = L_cls + .5*L_adv + .005*L_er + .01*L_cel
-        update F, T, D, and T'_i
-
-    evaluate source validation
-    save best checkpoint
-```
+Target-comparison DGER and DGNT share the alternating phase order in Section
+9.2 under the target paper's 100-epoch/source-validation protocol. The primary
+classification and domain losses average the five source-domain expectations,
+which gives them the same expectation scale as DNT's mean interpolation loss.
+DGNT differs from this DGER baseline only by adding $\lambda L_{int}$ and
+$T_\psi$ to the first joint phase. Each later per-domain auxiliary draw uses 12
+examples, an explicit reconstruction because the target paper does not specify
+the nested DGER batch size.
 
 ### 9.4 Original-DGER track
 
@@ -598,6 +584,8 @@ Track B uses separate learning-rate parameter groups:
 F/T/D:      1e-4
 T_i/T'_i:   1e-5
 iterations: 3000
+source data: all 100 examples per class and domain
+selection:  final iteration (no source-validation holdout)
 ```
 
 Log Track B separately from the target-paper-comparable Track A.
@@ -613,20 +601,18 @@ $$
 \qquad \lambda=1.
 $$
 
-The primary implementation applies DGER losses to original source examples and
-adds interpolation loss to the encoder/classifier/interpolator update. Applying
-DGER auxiliary losses to interpolated features is a separate ablation.
+The primary implementation adds interpolation to DGER's first joint phase and
+keeps every later per-domain DGER phase unchanged. Applying DGER auxiliary
+losses to interpolated features is a separate ablation.
 
 ```text
-for each balanced source batch:
-    update DGER stabilizers T_i
-    compute DGER main/adversarial/entropy/stabilizer losses
+for each 64-item paired source batch:
+    update F, T, D, T_psi on L_cls + alpha_1 L_adv + lambda L_int
 
-    sample same-class cross-domain pairs
-    compute interpolation path and endpoint loss
-
-    add L_int to the F/T update
-    update T_psi
+    for each source i:
+        update only T_i on its own-domain classification loss
+        update F and T'_i on the entropy/GRL loss
+        update only F against frozen T_i on every other source
 
     discard D, T_i, T'_i, and T_psi at inference
 ```

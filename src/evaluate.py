@@ -17,14 +17,16 @@ PAPER_REFERENCE_ACCURACY = {
 }
 
 
-def aggregate_results(results_root: Path) -> dict:
+def aggregate_results(results_root: Path, require_paper_matrix: bool = False) -> dict:
     """Aggregate every target metric per angle and across angles/seeds."""
     per_angle_values: dict[str, dict[str, list[float]]] = {}
     per_seed_values: dict[tuple[str, float, int], dict[str, list[float]]] = {}
+    matrix_targets: dict[tuple[str, float, int], set[int]] = {}
     for path in results_root.rglob("final_metrics.json"):
         payload = json.loads(path.read_text())
         configuration = yaml.safe_load((path.parent / "resolved_config.yaml").read_text())
         method, budget, target, seed = configuration["method"], float(configuration["data_budget"]), configuration["target_angle"], int(configuration["seed"])
+        matrix_targets.setdefault((method, budget, seed), set()).add(int(target))
         angle_key = f"{method}/budget_{budget}/target_{target}"
         metrics = payload["target"]
         for metric, value in metrics.items():
@@ -37,15 +39,39 @@ def aggregate_results(results_root: Path) -> dict:
         for metric, values in metrics.items():
             overall_values.setdefault(overall_key, {}).setdefault(metric, []).append(sum(values) / len(values))
     overall = {key: {metric: aggregate(values) for metric, values in metrics.items()} for key, metrics in sorted(overall_values.items())}
+    matrix_complete = {}
+    for key in overall:
+        method, budget = key.split("/budget_")
+        budget_value = float(budget)
+        seed_targets = {
+            seed: targets for (candidate, candidate_budget, seed), targets in matrix_targets.items()
+            if candidate == method and candidate_budget == budget_value
+        }
+        matrix_complete[key] = (
+            len(seed_targets) == 5
+            and all(targets == {0, 15, 30, 45, 60, 75} for targets in seed_targets.values())
+        )
+    if require_paper_matrix and not all(matrix_complete.values()):
+        incomplete = ", ".join(key for key, complete in matrix_complete.items() if not complete)
+        raise ValueError(
+            "Paper-comparable aggregation requires six target angles and exactly five seeds "
+            f"for every method/budget group; incomplete: {incomplete}."
+        )
     references = {key: PAPER_REFERENCE_ACCURACY[method][budget] for key in overall for method, budget in [(key.split("/")[0], float(key.split("budget_")[1]))]}
-    return {"per_angle": per_angle, "overall_across_angles": overall, "paper_reference_accuracy_percent": references}
+    return {"per_angle": per_angle, "overall_across_angles": overall, "paper_matrix_complete": matrix_complete, "paper_reference_accuracy_percent": references}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_root", type=Path)
+    parser.add_argument(
+        "--require-paper-matrix", action="store_true",
+        help="Reject reports missing any of six targets or exactly five seeds.",
+    )
     arguments = parser.parse_args()
-    report = aggregate_results(arguments.results_root)
+    report = aggregate_results(
+        arguments.results_root, require_paper_matrix=arguments.require_paper_matrix,
+    )
     output = arguments.results_root / "aggregate.json"
     output.write_text(json.dumps(report, indent=2, sort_keys=True))
     print(json.dumps(report, indent=2, sort_keys=True))

@@ -24,15 +24,17 @@ class DNT(DomainGeneralizationMethod):
     def train_step(self, batch: Mapping[str, Tensor], pair_batch: Mapping[str, Tensor] | None = None) -> dict[str, float]:
         if pair_batch is None:
             raise ValueError("DNT needs a same-class cross-domain pair batch.")
-        output = self.network(batch["image"])
-        classification = functional.cross_entropy(output.logits, batch["label"])
-        start, end = self.network(pair_batch["left_image"]).features, self.network(pair_batch["right_image"]).features
+        del batch  # Algorithm 1 defines both losses on the paired minibatches.
+        left_output = self.network(pair_batch["left_image"])
+        start = left_output.features
+        end = self.network(pair_batch["right_image"]).features
+        classification = functional.cross_entropy(left_output.logits, pair_batch["label"])
         interpolated = interpolation_loss(self.network.classifier, start, end, pair_batch["label"], self.interpolator, self.weights)
         total = classification + self.loss_weight * interpolated.total
         self.optimizer.zero_grad(set_to_none=True)
         total.backward()
         self.optimizer.step()
-        return {"loss": total.item(), "classification_loss": classification.item(), "interpolation_loss": interpolated.total.item(), "path_loss": interpolated.path.item(), "endpoint_loss": interpolated.endpoint.item(), "accuracy": (output.logits.argmax(1) == batch["label"]).float().mean().item()}
+        return {"loss": total.item(), "classification_loss": classification.item(), "interpolation_loss": interpolated.total.item(), "path_loss": interpolated.path.item(), "endpoint_loss": interpolated.endpoint.item(), "accuracy": (left_output.logits.argmax(1) == pair_batch["label"]).float().mean().item()}
 
     def predict(self, images: Tensor) -> Tensor:
         return self.network(images).logits

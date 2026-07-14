@@ -1,7 +1,9 @@
+import pytest
 import torch
+from torch.nn import functional as functional
 
 from dg.models.interpolator import LatentInterpolator
-from dg.training.losses import interpolation_loss, interpolation_path
+from dg.training.losses import endpoint_loss, interpolation_loss, interpolation_path
 
 
 def test_interpolation_endpoints_and_gradients():
@@ -22,11 +24,63 @@ def test_interpolation_endpoints_and_gradients():
 
 def test_endpoint_loss_is_zero_for_identity_displacement():
     displacement = torch.randn(2, 64)
-    from dg.training.losses import endpoint_loss
     assert endpoint_loss(displacement, displacement).item() == 0.0
 
 
 def test_identity_displacement_reaches_the_second_endpoint():
     start, end = torch.randn(3, 64), torch.randn(3, 64)
     endpoint = interpolation_path(start, end - start, (0.0, 1.0))[-1]
-    assert torch.allclose(endpoint, end)
+    # start + (end - start) can accumulate one float32 rounding step near zero.
+    assert torch.allclose(endpoint, end, atol=1e-6, rtol=1e-5)
+
+
+def test_endpoint_loss_is_mean_per_example_l2_norm_not_elementwise_mse():
+    displacement = torch.tensor([[3.0, 4.0], [0.0, 0.0]])
+    expected_displacement = torch.zeros_like(displacement)
+
+    loss = endpoint_loss(displacement, expected_displacement)
+
+    # The paper writes an L2 norm inside an expectation. The first example has
+    # norm 5 and the second norm 0, hence the minibatch expectation is 2.5.
+    assert torch.allclose(loss, torch.tensor(2.5))
+
+
+def test_reported_interpolator_has_three_convolutional_layers_and_preserves_vectors():
+    interpolator = LatentInterpolator(latent_size=64)
+    convolution_types = (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)
+    convolutions = [
+        module for module in interpolator.modules()
+        if isinstance(module, convolution_types)
+    ]
+    displacement = torch.randn(4, 64)
+
+    transformed = interpolator(displacement)
+
+    assert len(convolutions) == 3
+    assert transformed.shape == displacement.shape
+
+
+def test_dnt_classification_loss_uses_left_endpoints_from_the_paired_batch():
+    from dg.methods.dnt import DNT
+
+    torch.manual_seed(17)
+    method = DNT({"lr": 0.0, "momentum": 0.0, "weight_decay": 0.0})
+    ordinary_batch = {
+        "image": torch.zeros(2, 1, 28, 28),
+        "label": torch.tensor([0, 0]),
+        "domain": torch.tensor([0, 1]),
+    }
+    pair_batch = {
+        "left_image": torch.ones(2, 1, 28, 28),
+        "right_image": -torch.ones(2, 1, 28, 28),
+        "label": torch.tensor([8, 9]),
+    }
+    with torch.no_grad():
+        expected = functional.cross_entropy(
+            method.network(pair_batch["left_image"]).logits,
+            pair_batch["label"],
+        )
+
+    metrics = method.train_step(ordinary_batch, pair_batch)
+
+    assert metrics["classification_loss"] == pytest.approx(expected.item())
