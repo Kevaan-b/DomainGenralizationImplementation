@@ -33,6 +33,6 @@ def seed_everything(seed: int, deterministic: bool = True) -> None:
 
 
 def environment_metadata(device: torch.device, deterministic: bool) -> dict[str, Any]:
-    return {"python": sys.version, "torch": torch.__version__, "torchvision": torchvision.__version__, "cuda": torch.version.cuda,
+    return {"python": sys.version, "torch": str(torch.__version__), "torchvision": str(torchvision.__version__), "cuda": str(torch.version.cuda) if torch.version.cuda is not None else None,
             "device": str(device), "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
             "platform": platform.platform(), "deterministic": deterministic}
