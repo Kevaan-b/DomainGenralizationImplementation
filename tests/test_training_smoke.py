@@ -212,3 +212,42 @@ def test_paper_iteration_samples_fresh_batches_with_correct_domain_routing():
     for domain_id, episode in enumerate(iteration.episodes):
         assert set(episode.own["domain"].tolist()) == {domain_id}
         assert {int(batch["domain"].item()) for batch in episode.others} == set(range(5)) - {domain_id}
+
+
+def test_two_step_ablation_routes_dger_family_to_episode_preserving_two_step(tmp_path: Path):
+    class SpyTwoStepMethod(torch.nn.Module):
+        def __init__(self, expects_pair: bool):
+            super().__init__()
+            self.expects_pair = expects_pair
+            self.register_buffer("steps", torch.tensor(0))
+
+        def two_step_train_step(self, iteration, pair_batch=None):
+            assert len(iteration.main["image"]) == 64
+            assert (pair_batch is not None) is self.expects_pair
+            self.steps.add_(1)
+            return {"loss": 1.0, "accuracy": 0.0}
+
+        def train_step(self, *args, **kwargs):
+            raise AssertionError("two_step must preserve Algorithm 1 episodes")
+
+        def paper_train_step(self, *args, **kwargs):
+            raise AssertionError("two_step must not use the alternating paper route")
+
+        def predict(self, images):
+            return torch.zeros(len(images), 10, device=images.device)
+
+    fold = make_fold(synthetic_cache(), target_angle=0, seed=3, budget=1.0)
+    for name in ("dger", "dgnt"):
+        method = SpyTwoStepMethod(expects_pair=name == "dgnt")
+        configuration = {
+            "method": name, "seed": 3, "batch_size": 64,
+            "pair_batch_size": 64, "dger_domain_batch_size": 2,
+            "epochs": 1, "iterations": 1, "num_workers": 0,
+            "update_schedule": "two_step", "ablation": {"name": "two_step"},
+        }
+
+        TrainingEngine(
+            method, fold, configuration, tmp_path / name, torch.device("cpu"),
+        ).run()
+
+        assert method.steps.item() == 1

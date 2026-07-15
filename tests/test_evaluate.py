@@ -21,3 +21,20 @@ def test_aggregation_reports_per_angle_and_seed_level_overall_metrics(tmp_path):
 
     with pytest.raises(ValueError, match="six target angles and exactly five seeds"):
         aggregate_results(tmp_path, require_paper_matrix=True)
+
+
+def test_paper_aggregation_excludes_diagnostic_ablations(tmp_path):
+    run = tmp_path / "ablation"
+    run.mkdir()
+    (run / "resolved_config.yaml").write_text(yaml.safe_dump({
+        "method": "dnt", "data_budget": 1.0, "target_angle": 75, "seed": 0,
+        "paper_comparable": False, "ablation": {"name": "lambda_0"},
+    }))
+    (run / "final_metrics.json").write_text(json.dumps({
+        "target": {"accuracy": .99},
+    }))
+
+    report = aggregate_results(tmp_path)
+
+    assert report["overall_across_angles"] == {}
+    assert report["paper_reference_accuracy_percent"] == {}

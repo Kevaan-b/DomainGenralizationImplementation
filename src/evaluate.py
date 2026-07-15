@@ -25,6 +25,8 @@ def aggregate_results(results_root: Path, require_paper_matrix: bool = False) ->
     for path in results_root.rglob("final_metrics.json"):
         payload = json.loads(path.read_text())
         configuration = yaml.safe_load((path.parent / "resolved_config.yaml").read_text())
+        if configuration.get("paper_comparable") is False or configuration.get("ablation"):
+            continue
         method, budget, target, seed = configuration["method"], float(configuration["data_budget"]), configuration["target_angle"], int(configuration["seed"])
         matrix_targets.setdefault((method, budget, seed), set()).add(int(target))
         angle_key = f"{method}/budget_{budget}/target_{target}"

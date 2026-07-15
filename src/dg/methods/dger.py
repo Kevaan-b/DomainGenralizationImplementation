@@ -237,6 +237,95 @@ class DGER(DomainGeneralizationMethod):
             **{name: value.item() for name, value in additional_metrics.items()},
         }
 
+    def two_step_train_step(
+        self, iteration: DGERIteration, pair_batch: TensorBatch | None = None,
+    ) -> dict[str, float]:
+        """Group the same Algorithm 1 objectives into two optimizer updates.
+
+        This is a diagnostic schedule ablation: it consumes the identical main
+        batch and per-domain episodes as :meth:`paper_train_step`, but combines
+        all stabilizer fits into one update and all feature-side objectives into
+        a second update.
+        """
+        self._validate_paper_iteration(iteration)
+        num_domains = len(self.auxiliaries.stabilizers)
+
+        self._freeze_all()
+        _set_grad(self.auxiliaries.stabilizers, True)
+        stabilizer_losses = []
+        for domain_id, episode in enumerate(iteration.episodes):
+            with torch.no_grad():
+                features = self.network.encoder(episode.own["image"])
+            stabilizer_losses.append(functional.cross_entropy(
+                self.auxiliaries.stabilizers[domain_id](features),
+                episode.own["label"],
+            ))
+        stabilizer = torch.stack(stabilizer_losses).sum()
+        self._zero_all_optimizers()
+        (self.alpha_3 * stabilizer).backward()
+        self.stabilizer_optimizer.step()
+
+        self._freeze_all()
+        _set_grad(self.network, True)
+        _set_grad(self.auxiliaries.discriminator, True)
+        _set_grad(self.auxiliaries.entropy_heads, True)
+        output = self.network(iteration.main["image"])
+        classification = sum_domain_cross_entropy(
+            output.logits, iteration.main["label"], iteration.main["domain"],
+            num_domains,
+        )
+        adversarial = sum_domain_cross_entropy(
+            self.auxiliaries.discriminator(gradient_reverse(output.features)),
+            iteration.main["domain"], iteration.main["domain"], num_domains,
+        )
+        if self.domain_reduction == "mean":
+            classification = classification / num_domains
+            adversarial = adversarial / num_domains
+
+        additional, additional_metrics = self._primary_additional_loss(pair_batch)
+        entropy_losses, cross_domain_losses = [], []
+        for domain_id, episode in enumerate(iteration.episodes):
+            own_features = self.network.encoder(episode.own["image"])
+            entropy_losses.append(functional.cross_entropy(
+                self.auxiliaries.entropy_heads[domain_id](
+                    gradient_reverse(own_features),
+                ),
+                episode.own["label"],
+            ))
+            stabilizer_head = self.auxiliaries.stabilizers[domain_id]
+            cross_domain_losses.append(torch.stack([
+                functional.cross_entropy(
+                    stabilizer_head(self.network.encoder(batch["image"])),
+                    batch["label"],
+                )
+                for batch in episode.others
+            ]).sum())
+        entropy = torch.stack(entropy_losses).sum()
+        cross_domain = torch.stack(cross_domain_losses).sum()
+        total = (
+            classification + self.alpha_1 * adversarial
+            + self.alpha_2 * entropy + self.alpha_3 * cross_domain + additional
+        )
+        self._zero_all_optimizers()
+        total.backward()
+        self.main_optimizer.step()
+
+        diagnostic_total = total.detach() + self.alpha_3 * stabilizer.detach()
+        return {
+            "loss": total.item(),
+            "diagnostic_weighted_loss_sum": diagnostic_total.item(),
+            "classification_loss": classification.item(),
+            "adversarial_loss": adversarial.item(),
+            "stabilizer_fit_loss": stabilizer.item(),
+            "entropy_loss": entropy.item(),
+            "stabilizing_loss": cross_domain.item(),
+            "optimizer_steps": 2.0,
+            "accuracy": (
+                output.logits.detach().argmax(1) == iteration.main["label"]
+            ).float().mean().item(),
+            **{name: value.detach().item() for name, value in additional_metrics.items()},
+        }
+
     def _train_stabilizers(self, images: Tensor, labels: Tensor, domains: Tensor) -> Tensor:
         _set_grad(self.network, False)
         _set_grad(self.auxiliaries, False)

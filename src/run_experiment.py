@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,33 @@ from dg.training.engine import TrainingEngine, make_fold
 from dg.training.reproducibility import environment_metadata, resolve_device, seed_everything
 
 
+def _resolve_ablation_identity(
+    config: dict[str, Any], repo_root: Path,
+) -> dict[str, Any]:
+    """Bind an ablation config to this source/runtime or reject it as stale."""
+    if not isinstance(config.get("ablation"), dict):
+        return deepcopy(config)
+    from ablation_sweep import _code_fingerprint, config_fingerprint
+
+    resolved = deepcopy(config)
+    ablation = resolved["ablation"]
+    current_code = _code_fingerprint(repo_root)
+    recorded_code = ablation.get("code_fingerprint")
+    if recorded_code is not None and recorded_code != current_code:
+        raise ValueError(
+            "Stale ablation config: its code fingerprint does not match this runtime."
+        )
+    ablation["code_fingerprint"] = current_code
+    current_config = config_fingerprint(resolved)
+    recorded_config = ablation.get("config_fingerprint")
+    if recorded_config is not None and recorded_config != current_config:
+        raise ValueError(
+            "Stale ablation config: its configuration fingerprint does not match."
+        )
+    ablation["config_fingerprint"] = current_config
+    return resolved
+
+
 def _git_metadata() -> dict[str, Any]:
     try:
         return {"commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], text=True).strip())}
@@ -33,12 +61,23 @@ def _create_method(config: dict[str, Any], source_domains: int):
     if config["method"] == "deepall":
         return DeepAll.create(**optimizer)
     if config["method"] == "dnt":
-        return DNT(optimizer, loss["interpolation_lambda"], loss["interpolation_weights"])
+        return DNT(
+            optimizer, loss["interpolation_lambda"], loss["interpolation_weights"],
+            loss.get("interpolation_mode", "learned"),
+            loss.get("endpoint_normalization", "none"),
+        )
     arguments = {"alpha_1": loss["dger_alpha_1"], "alpha_2": loss["dger_alpha_2"], "alpha_3": loss["dger_alpha_3"], "auxiliary_lr": optimizer.pop("auxiliary_lr", None), "domain_reduction": "sum" if config["track"] == "dger_original" else "mean"}
     if config["method"] == "dger":
         return DGER(source_domains, optimizer, **arguments)
     if config["method"] == "dgnt":
-        return DGNT(source_domains, optimizer, interpolation_lambda=loss["interpolation_lambda"], weights=loss["interpolation_weights"], **arguments)
+        return DGNT(
+            source_domains, optimizer,
+            interpolation_lambda=loss["interpolation_lambda"],
+            weights=loss["interpolation_weights"],
+            interpolation_mode=loss.get("interpolation_mode", "learned"),
+            endpoint_normalization=loss.get("endpoint_normalization", "none"),
+            **arguments,
+        )
     raise ValueError(f"Unsupported method: {config['method']}")
 
 
@@ -51,9 +90,22 @@ def main() -> None:
     parser.add_argument("--data-budget", type=float, choices=(1.0, 0.2, 0.1, 0.05))
     arguments = parser.parse_args()
     config = yaml.safe_load(arguments.config.read_text())
-    for name, value in (("method", arguments.method), ("target_angle", arguments.target_angle), ("seed", arguments.seed), ("data_budget", arguments.data_budget)):
-        if value is not None:
-            config[name] = value
+    repo_root = Path(__file__).resolve().parents[1]
+    config = _resolve_ablation_identity(config, repo_root)
+    overrides = {
+        name: value for name, value in (
+            ("method", arguments.method),
+            ("target_angle", arguments.target_angle),
+            ("seed", arguments.seed),
+            ("data_budget", arguments.data_budget),
+        ) if value is not None
+    }
+    if overrides:
+        config = {**config, **overrides}
+        if isinstance(config.get("ablation"), dict):
+            config = deepcopy(config)
+            config["ablation"].pop("config_fingerprint", None)
+            config = _resolve_ablation_identity(config, repo_root)
     validate_experiment_config(config)
     device = resolve_device(config["device"])
     seed_everything(config["seed"], config["deterministic"])
@@ -62,16 +114,64 @@ def main() -> None:
         cache, config["target_angle"], config["seed"], config["data_budget"],
         validation_fraction=float(config.get("source_validation_fraction", 0.1)),
     )
-    run_dir = Path(config["results_root"]) / config["track"] / config["method"] / f"target_{config['target_angle']}_seed_{config['seed']}_budget_{config['data_budget']}"
+    if isinstance(config.get("ablation"), dict):
+        from ablation_sweep import ablation_run_dir
+        run_dir = ablation_run_dir(config)
+    else:
+        run_dir = Path(config["results_root"]) / config["track"] / config["method"] / f"target_{config['target_angle']}_seed_{config['seed']}_budget_{config['data_budget']}"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=True))
     model_config = {
         "encoder": "Conv2d(1,32,5)-ReLU-MaxPool2d(2)-Conv2d(32,64,5)-ReLU-MaxPool2d(2)-Linear(1024,64)-ReLU",
         "classifier": "Linear(64,10)",
         "latent_size": 64,
-        "interpolator": "Conv1d(1,64,3,padding=1)-ReLU-Conv1d(64,64,3,padding=1)-ReLU-Conv1d(64,1,3,padding=1)",
+        "interpolator": (
+            config["loss"].get("interpolation_mode", "learned")
+            if config["method"] in {"dnt", "dgnt"} else None
+        ),
     }
     source_count = len(fold.source_angles)
+    update_schedule = config.get("update_schedule", "method_faithful")
+    interpolation_mode = config["loss"].get("interpolation_mode", "learned")
+    endpoint_normalization = config["loss"].get("endpoint_normalization", "none")
+    interpolator_description = {
+        "learned": "learned Conv1d interpolator (channels=64, kernel_size=3, padding=1)",
+        "identity": "fixed identity/linear latent interpolation",
+        "residual": "zero-initialized residual Conv1d interpolator",
+    }[interpolation_mode]
+    reconstruction_choices = [
+        "near-balanced 13/13/13/13/12 allocation for batch size 64",
+        "mean minibatch/domain loss reductions",
+    ]
+    if config["method"] in {"dnt", "dgnt"}:
+        reconstruction_choices.extend([
+            "five-point uniform interpolation grid",
+            interpolator_description,
+            f"endpoint normalization: {endpoint_normalization}",
+            "DNT/DGNT batch size 64 interpreted as 64 pairs",
+        ])
+    if config["method"] in {"dger", "dgnt"}:
+        reconstruction_choices.extend([
+            f"DGER per-domain auxiliary batch size {config['dger_domain_batch_size']}",
+            "DGER alpha weights imported from Zhao et al.",
+        ])
+    if config["method"] == "dgnt":
+        reconstruction_choices.append(
+            "DGNT interpolation added to the first joint DGER phase only",
+        )
+    dger_protocol = ({
+        "dger_update_schedule": (
+            "two_step_episode_preserving_ablation"
+            if update_schedule == "two_step"
+            else "alternating_algorithm_1_phases"
+        ),
+        "dger_optimizer_steps_per_minibatch": (
+            2 if update_schedule == "two_step" else 1 + 3 * source_count
+        ),
+        "dger_feature_updates_per_minibatch": (
+            1 if update_schedule == "two_step" else 1 + 2 * source_count
+        ),
+    } if config["method"] in {"dger", "dgnt"} else {})
     paper_protocol = ({
         "outer_iterations": int(config["iterations"]),
         "optimizer_steps_per_iteration": 1 + 3 * source_count,
@@ -88,17 +188,9 @@ def main() -> None:
         "epochs": int(config["epochs"]),
         "checkpoint_selection": "best_macro_source_validation",
         "domain_loss_reduction": "mean",
-        "dger_update_schedule": "alternating_algorithm_1_phases",
-        "reconstruction_choices": [
-            "five-point uniform interpolation grid",
-            "Conv1d interpolator channels=64, kernel_size=3, padding=1",
-            "near-balanced 13/13/13/13/12 allocation for batch size 64",
-            "DNT/DGNT batch size 64 interpreted as 64 pairs",
-            f"DGER per-domain auxiliary batch size {config['dger_domain_batch_size']}",
-            "mean minibatch/domain loss reductions",
-            "DGNT interpolation added to the first joint DGER phase only",
-            "DGER alpha weights imported from Zhao et al.",
-        ],
+        "paper_comparable": config.get("paper_comparable", True),
+        "reconstruction_choices": reconstruction_choices,
+        **dger_protocol,
     } if config["track"] == "target_comparison" else None)
     batch_metadata = (
         {"main_step_batch_size": config["batch_per_domain"] * source_count}

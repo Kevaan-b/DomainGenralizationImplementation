@@ -83,6 +83,43 @@ def test_dger_uses_algorithm_one_optimizer_step_order(monkeypatch):
     assert counts == {"main": 1 + 2 * 2, "stabilizer": 2}
 
 
+def test_two_step_ablation_preserves_raw_objectives_and_only_groups_updates(monkeypatch):
+    from dg.methods.dger import DGER
+
+    optimizer = {"lr": 0.0, "momentum": 0.0, "weight_decay": 0.0}
+    alternating = DGER(2, optimizer, domain_reduction="mean")
+    grouped = DGER(2, optimizer, domain_reduction="mean")
+    grouped.load_state_dict(alternating.state_dict())
+    iteration = _two_domain_iteration()
+    counts = {"main": 0, "stabilizer": 0}
+
+    def count_step(name, original):
+        def wrapped(*args, **kwargs):
+            counts[name] += 1
+            return original(*args, **kwargs)
+        return wrapped
+
+    monkeypatch.setattr(
+        grouped.main_optimizer, "step",
+        count_step("main", grouped.main_optimizer.step),
+    )
+    monkeypatch.setattr(
+        grouped.stabilizer_optimizer, "step",
+        count_step("stabilizer", grouped.stabilizer_optimizer.step),
+    )
+
+    alternating_metrics = alternating.paper_train_step(iteration)
+    grouped_metrics = grouped.two_step_train_step(iteration)
+
+    for name in (
+        "classification_loss", "adversarial_loss", "stabilizer_fit_loss",
+        "entropy_loss", "stabilizing_loss",
+    ):
+        assert grouped_metrics[name] == pytest.approx(alternating_metrics[name])
+    assert grouped_metrics["optimizer_steps"] == 2.0
+    assert counts == {"main": 1, "stabilizer": 1}
+
+
 def test_dger_algorithm_one_has_exact_gradient_owner_order(monkeypatch):
     from dg.methods.dger import DGER
 

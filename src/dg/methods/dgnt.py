@@ -13,9 +13,9 @@ from .dger import DGER, TensorBatch, _set_grad
 
 
 class DGNT(DGER):
-    def __init__(self, num_domains: int, optimizer_kwargs: dict[str, object], alpha_1: float = .5, alpha_2: float = .005, alpha_3: float = .01, interpolation_lambda: float = 1., weights: Iterable[float] = (0., .25, .5, .75, 1.), auxiliary_lr: float | None = None, domain_reduction: str = "sum") -> None:
+    def __init__(self, num_domains: int, optimizer_kwargs: dict[str, object], alpha_1: float = .5, alpha_2: float = .005, alpha_3: float = .01, interpolation_lambda: float = 1., weights: Iterable[float] = (0., .25, .5, .75, 1.), auxiliary_lr: float | None = None, domain_reduction: str = "sum", interpolation_mode: str = "learned", endpoint_normalization: str = "none") -> None:
         super().__init__(num_domains, optimizer_kwargs, alpha_1, alpha_2, alpha_3, auxiliary_lr, domain_reduction)
-        self.interpolator = LatentInterpolator()
+        self.interpolator = LatentInterpolator(mode=interpolation_mode)
         primary_parameters = list(self.network.parameters()) + list(self.auxiliaries.discriminator.parameters()) + list(self.interpolator.parameters())
         entropy_parameters = list(self.auxiliaries.entropy_heads.parameters())
         main_groups: list[dict[str, object]] = [{"params": primary_parameters}, {"params": entropy_parameters}]
@@ -23,6 +23,8 @@ class DGNT(DGER):
             main_groups[1]["lr"] = auxiliary_lr
         self.main_optimizer = torch.optim.SGD(main_groups, **optimizer_kwargs)
         self.interpolation_lambda, self.weights = interpolation_lambda, tuple(weights)
+        self.interpolation_mode = interpolation_mode
+        self.endpoint_normalization = endpoint_normalization
 
     def _primary_additional_loss(
         self, pair_batch: TensorBatch | None,
@@ -35,7 +37,7 @@ class DGNT(DGER):
         end = self.network.encoder(pair_batch["right_image"])
         interpolation = interpolation_loss(
             self.network.classifier, start, end, pair_batch["label"],
-            self.interpolator, self.weights,
+            self.interpolator, self.weights, self.endpoint_normalization,
         )
         weighted = self.interpolation_lambda * interpolation.total
         return weighted, {
@@ -53,7 +55,10 @@ class DGNT(DGER):
         _set_grad(self.interpolator, True)
         start = self.network(pair_batch["left_image"]).features
         end = self.network(pair_batch["right_image"]).features
-        interpolation = interpolation_loss(self.network.classifier, start, end, pair_batch["label"], self.interpolator, self.weights)
+        interpolation = interpolation_loss(
+            self.network.classifier, start, end, pair_batch["label"],
+            self.interpolator, self.weights, self.endpoint_normalization,
+        )
         total = dger_total + self.interpolation_lambda * interpolation.total
         self.main_optimizer.zero_grad(set_to_none=True)
         total.backward()

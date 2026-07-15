@@ -12,14 +12,29 @@ class LatentInterpolator(nn.Module):
     shape through three convolutional layers.
     """
 
-    def __init__(self, latent_size: int = 64, hidden_channels: int = 64) -> None:
+    def __init__(
+        self, latent_size: int = 64, hidden_channels: int = 64,
+        mode: str = "learned",
+    ) -> None:
         super().__init__()
+        if mode not in {"learned", "identity", "residual"}:
+            raise ValueError("Interpolator mode must be learned, identity, or residual.")
         self.latent_size = latent_size
-        self.network = nn.Sequential(
-            nn.Conv1d(1, hidden_channels, kernel_size=3, padding=1), nn.ReLU(),
-            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=3, padding=1), nn.ReLU(),
-            nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1),
-        )
+        self.mode = mode
+        if mode == "identity":
+            self.network = nn.Identity()
+        else:
+            self.network = nn.Sequential(
+                nn.Conv1d(1, hidden_channels, kernel_size=3, padding=1), nn.ReLU(),
+                nn.Conv1d(hidden_channels, hidden_channels, kernel_size=3, padding=1), nn.ReLU(),
+                nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1),
+            )
+            if mode == "residual":
+                final = self.network[-1]
+                if not isinstance(final, nn.Conv1d):
+                    raise TypeError("Residual interpolator requires a convolutional final layer.")
+                nn.init.zeros_(final.weight)
+                nn.init.zeros_(final.bias)
 
     def forward(self, displacement):  # type: ignore[no-untyped-def]
         if displacement.ndim != 2 or displacement.shape[1] != self.latent_size:
@@ -27,4 +42,7 @@ class LatentInterpolator(nn.Module):
                 f"Expected displacement shape [batch, {self.latent_size}], "
                 f"got {tuple(displacement.shape)}."
             )
-        return self.network(displacement.unsqueeze(1)).squeeze(1)
+        if self.mode == "identity":
+            return displacement
+        transformed = self.network(displacement.unsqueeze(1)).squeeze(1)
+        return displacement + transformed if self.mode == "residual" else transformed

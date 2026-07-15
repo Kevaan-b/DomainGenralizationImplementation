@@ -232,9 +232,16 @@ class TrainingEngine:
                     if self.configuration["method"] in {"dger", "dgnt"}:
                         if dger_sampler is None:
                             raise RuntimeError("DGER Algorithm 1 sampler was not initialized.")
-                        epoch_metrics.append(self.method.paper_train_step(
-                            self._paper_iteration(dger_sampler, main=batch), pair_batch=pair,
-                        ))
+                        iteration = self._paper_iteration(dger_sampler, main=batch)
+                        if self.configuration.get("update_schedule") == "two_step":
+                            metrics = self.method.two_step_train_step(
+                                iteration, pair_batch=pair,
+                            )
+                        else:
+                            metrics = self.method.paper_train_step(
+                                iteration, pair_batch=pair,
+                            )
+                        epoch_metrics.append(metrics)
                     else:
                         epoch_metrics.append(self.method.train_step(batch, pair))
                     self.global_step += 1

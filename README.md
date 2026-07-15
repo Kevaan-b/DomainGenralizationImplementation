@@ -79,6 +79,38 @@ schedule on an NVIDIA worker; run all 100% jobs first, then the 20%, 10%, and
 5% jobs. Do not use target accuracy to decide which jobs or checkpoints to
 keep.
 
+## Run diagnostic ablations
+
+Use the dedicated sweep to isolate the observed DNT/DGER/DGNT optimization
+instability. Its defaults screen targets 30° and 75° with seeds 0, 1, and 2:
+
+```bash
+PYTHONPATH=src python3 src/ablation_sweep.py \
+  --config configs/rotated_mnist_target.yaml \
+  --data-budget 1.0
+```
+
+The first-stage default includes a DeepAll control; DNT `lambda=0`, identity,
+zero-initialized residual, and endpoint-`sqrt(64)` variants; and alternating
+versus two-step DGER schedules. Once DNT and DGER are stable, add
+`--methods dgnt` to screen the corresponding DGNT controls. Use `--methods`,
+`--target-angles`, `--seeds`, or `--variants` to narrow it. Preview commands without training:
+
+```bash
+PYTHONPATH=src python3 src/ablation_sweep.py \
+  --config configs/rotated_mnist_target.yaml \
+  --methods dnt dger --target-angles 75 --seeds 0 \
+  --data-budget 0.1 --dry-run
+```
+
+Ablations are saved below `results/target_comparison/ablations/`, marked
+`paper_comparable: false`, and excluded from the paper-result aggregator. The
+two-step option preserves the alternating route's sampled domain episodes,
+loss definitions, reductions, and coefficients, while grouping them into one
+stabilizer update and one main-model update. It is diagnostic rather than the
+official RotatedMNIST schedule. Result paths include a full configuration and
+source-code fingerprint so `--skip-existing` cannot silently reuse stale runs.
+
 ## Run artifacts and evaluation policy
 
 Comparison runs record per-epoch losses, source validation per angle, `last.pt`,

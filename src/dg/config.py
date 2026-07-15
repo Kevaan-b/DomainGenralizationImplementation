@@ -10,6 +10,90 @@ METHODS = frozenset({"deepall", "dnt", "dger", "dgnt"})
 DATA_BUDGETS = frozenset({1.0, 0.2, 0.1, 0.05})
 
 
+def _validate_ablation_contract(config: dict[str, Any]) -> None:
+    """Lock diagnostic labels to the exact one-factor settings they claim."""
+    ablation = config.get("ablation")
+    if not isinstance(ablation, dict):
+        return
+    if config.get("paper_comparable") is not False:
+        raise ValueError("Ablations must explicitly set paper_comparable=false.")
+    if config.get("ablation_schema_version") != 1:
+        raise ValueError("Ablations require ablation_schema_version=1.")
+    question = ablation.get("scientific_question")
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("Ablations require a non-empty scientific_question.")
+
+    method = config["method"]
+    name = ablation.get("name")
+    allowed = {
+        "deepall": {"control"},
+        "dnt": {
+            "baseline", "lambda_0", "interpolator_identity",
+            "interpolator_residual", "endpoint_sqrt",
+        },
+        "dger": {"alternating", "two_step"},
+        "dgnt": {
+            "baseline", "lambda_0", "interpolator_identity",
+            "interpolator_residual", "endpoint_sqrt", "two_step",
+        },
+    }
+    if name not in allowed[method]:
+        raise ValueError(
+            f"{name!r} is not a recognized ablation variant for {method}."
+        )
+
+    changed_knobs = {
+        "control": [],
+        "baseline": [],
+        "alternating": [],
+        "lambda_0": ["loss.interpolation_lambda"],
+        "interpolator_identity": ["loss.interpolation_mode"],
+        "interpolator_residual": ["loss.interpolation_mode"],
+        "endpoint_sqrt": ["loss.endpoint_normalization"],
+        "two_step": ["update_schedule"],
+    }[name]
+    if ablation.get("changed_knobs") != changed_knobs:
+        raise ValueError(
+            f"{name} is a one-factor ablation and requires changed_knobs={changed_knobs}."
+        )
+
+    loss = config["loss"]
+    expected_schedule = "two_step" if name == "two_step" else "method_faithful"
+    if config.get("update_schedule") != expected_schedule:
+        raise ValueError(
+            f"{name} requires update_schedule={expected_schedule}."
+        )
+    if method in {"dnt", "dgnt"}:
+        expected_interpolation = {
+            "interpolation_lambda": 0.0 if name == "lambda_0" else 1.0,
+            "interpolation_mode": {
+                "interpolator_identity": "identity",
+                "interpolator_residual": "residual",
+            }.get(name, "learned"),
+            "endpoint_normalization": (
+                "sqrt_latent" if name == "endpoint_sqrt" else "none"
+            ),
+        }
+        for key, expected in expected_interpolation.items():
+            default = "learned" if key == "interpolation_mode" else "none"
+            actual = loss.get(key, default)
+            if actual != expected:
+                raise ValueError(
+                    f"{name} one-factor contract requires {key}={expected!r}; "
+                    f"got {actual!r}."
+                )
+        if tuple(float(value) for value in loss.get("interpolation_weights", ())) != (
+            0.0, 0.25, 0.5, 0.75, 1.0,
+        ):
+            raise ValueError("Ablations require the fixed five-point interpolation grid.")
+    if method in {"dger", "dgnt"}:
+        alphas = tuple(float(loss.get(key, -1)) for key in (
+            "dger_alpha_1", "dger_alpha_2", "dger_alpha_3",
+        ))
+        if alphas != (0.5, 0.005, 0.01):
+            raise ValueError("Ablations require fixed DGER weights (0.5, 0.005, 0.01).")
+
+
 def validate_experiment_config(config: dict[str, Any]) -> None:
     """Reject silently incomparable or malformed benchmark runs at the CLI boundary."""
     required = {"track", "method", "seed", "target_angle", "data_budget", "data_root", "results_root", "dataset_seed", "angles", "device", "deterministic", "optimizer", "loss"}
@@ -47,6 +131,7 @@ def validate_experiment_config(config: dict[str, Any]) -> None:
     elif config["track"] != "target_comparison":
         raise ValueError("track must be target_comparison or dger_original.")
     else:
+        is_ablation = isinstance(config.get("ablation"), dict)
         if int(config.get("batch_size", 0)) != 64:
             raise ValueError("The target paper reports minibatch size 64.")
         if int(config.get("pair_batch_size", 0)) != 64:
@@ -55,8 +140,17 @@ def validate_experiment_config(config: dict[str, Any]) -> None:
             raise ValueError("A positive DGER per-domain batch size is required.")
         if int(config.get("epochs", 0)) != 100:
             raise ValueError("The target_comparison track requires exactly 100 epochs.")
-        if config.get("update_schedule") != "method_faithful":
-            raise ValueError("The target_comparison track requires method-faithful updates.")
+        update_schedule = config.get("update_schedule")
+        if update_schedule != "method_faithful":
+            allowed_two_step = (
+                is_ablation and update_schedule == "two_step"
+                and config["method"] in {"dger", "dgnt"}
+            )
+            if not allowed_two_step:
+                raise ValueError(
+                    "Nonstandard update schedules require an explicit ablation "
+                    "for a DGER-family method."
+                )
         optimizer = config["optimizer"]
         optimizer_contract = (
             optimizer.get("name") == "sgd"
@@ -68,7 +162,10 @@ def validate_experiment_config(config: dict[str, Any]) -> None:
             raise ValueError("The target paper requires SGD(lr=.001, momentum=.9, weight_decay=.001).")
         if config["method"] in {"dnt", "dgnt"}:
             loss = config["loss"]
-            if float(loss.get("interpolation_lambda", -1)) != 1.0:
+            interpolation_lambda = float(loss.get("interpolation_lambda", -1))
+            if not math.isfinite(interpolation_lambda) or interpolation_lambda < 0:
+                raise ValueError("Interpolation lambda must be finite and nonnegative.")
+            if not is_ablation and interpolation_lambda != 1.0:
                 raise ValueError("RotatedMNIST DNT/DGNT require interpolation lambda 1.")
             if loss.get("interpolation_policy") != "uniform_grid":
                 raise ValueError("The primary DNT/DGNT reconstruction requires interpolation_policy=uniform_grid.")
@@ -80,6 +177,16 @@ def validate_experiment_config(config: dict[str, Any]) -> None:
             differences = [right - left for left, right in zip(weights, weights[1:])]
             if any(difference <= 0 for difference in differences) or max(differences) - min(differences) > 1e-8:
                 raise ValueError("Interpolation weights must be a strictly increasing uniform grid.")
+            interpolation_mode = loss.get("interpolation_mode", "learned")
+            if interpolation_mode not in {"learned", "identity", "residual"}:
+                raise ValueError("Interpolation mode must be learned, identity, or residual.")
+            endpoint_normalization = loss.get("endpoint_normalization", "none")
+            if endpoint_normalization not in {"none", "sqrt_latent"}:
+                raise ValueError("Endpoint normalization must be none or sqrt_latent.")
+            if not is_ablation and (
+                interpolation_mode != "learned" or endpoint_normalization != "none"
+            ):
+                raise ValueError("Nonstandard interpolation settings require an explicit ablation.")
         if config["method"] in {"dger", "dgnt"}:
             alpha_keys = ("dger_alpha_1", "dger_alpha_2", "dger_alpha_3")
             if any(key not in config["loss"] for key in alpha_keys):
@@ -90,3 +197,4 @@ def validate_experiment_config(config: dict[str, Any]) -> None:
                 for key in alpha_keys
             ):
                 raise ValueError("DGER alpha weights must be finite and nonnegative.")
+        _validate_ablation_contract(config)

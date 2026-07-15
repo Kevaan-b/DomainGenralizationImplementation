@@ -15,11 +15,13 @@ from .base import DomainGeneralizationMethod
 
 
 class DNT(DomainGeneralizationMethod):
-    def __init__(self, optimizer_kwargs: dict[str, object], loss_weight: float = 1.0, weights: Iterable[float] = (0., .25, .5, .75, 1.)) -> None:
+    def __init__(self, optimizer_kwargs: dict[str, object], loss_weight: float = 1.0, weights: Iterable[float] = (0., .25, .5, .75, 1.), interpolation_mode: str = "learned", endpoint_normalization: str = "none") -> None:
         super().__init__()
-        self.network, self.interpolator = MNISTCNN(), LatentInterpolator()
+        self.network, self.interpolator = MNISTCNN(), LatentInterpolator(mode=interpolation_mode)
         self.optimizer = torch.optim.SGD(self.parameters(), **optimizer_kwargs)
         self.loss_weight, self.weights = loss_weight, tuple(weights)
+        self.interpolation_mode = interpolation_mode
+        self.endpoint_normalization = endpoint_normalization
 
     def train_step(self, batch: Mapping[str, Tensor], pair_batch: Mapping[str, Tensor] | None = None) -> dict[str, float]:
         if pair_batch is None:
@@ -29,7 +31,10 @@ class DNT(DomainGeneralizationMethod):
         start = left_output.features
         end = self.network(pair_batch["right_image"]).features
         classification = functional.cross_entropy(left_output.logits, pair_batch["label"])
-        interpolated = interpolation_loss(self.network.classifier, start, end, pair_batch["label"], self.interpolator, self.weights)
+        interpolated = interpolation_loss(
+            self.network.classifier, start, end, pair_batch["label"],
+            self.interpolator, self.weights, self.endpoint_normalization,
+        )
         total = classification + self.loss_weight * interpolated.total
         self.optimizer.zero_grad(set_to_none=True)
         total.backward()

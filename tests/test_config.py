@@ -75,3 +75,106 @@ def test_original_dger_config_locks_the_paper_protocol():
     config["source_validation_fraction"] = 0.1
     with pytest.raises(ValueError, match="without a validation holdout"):
         validate_experiment_config(config)
+
+
+def _explicit_ablation_config(method: str, name: str) -> dict:
+    config = _base_config()
+    config["method"] = method
+    changed_knobs = {
+        "lambda_0": ["loss.interpolation_lambda"],
+        "interpolator_identity": ["loss.interpolation_mode"],
+        "interpolator_residual": ["loss.interpolation_mode"],
+        "endpoint_sqrt": ["loss.endpoint_normalization"],
+        "two_step": ["update_schedule"],
+    }.get(name, [])
+    config["ablation_schema_version"] = 1
+    config["ablation"] = {
+        "name": name,
+        "scientific_question": "test contract",
+        "changed_knobs": changed_knobs,
+    }
+    config["paper_comparable"] = False
+    config["loss"].update({
+        "interpolation_policy": "uniform_grid",
+        "interpolation_mode": "learned",
+        "endpoint_normalization": "none",
+    })
+    if method in {"dger", "dgnt"}:
+        config["loss"].update({
+            "dger_alpha_1": .5, "dger_alpha_2": .005, "dger_alpha_3": .01,
+        })
+    return config
+
+
+def test_explicit_lambda_zero_ablation_is_valid_and_reaches_method_factory():
+    from run_experiment import _create_method
+
+    config = _explicit_ablation_config("dnt", "lambda_0")
+    config["loss"]["interpolation_lambda"] = 0.0
+
+    validate_experiment_config(config)
+    method = _create_method(config, source_domains=5)
+
+    assert method.loss_weight == 0.0
+
+
+@pytest.mark.parametrize("mode", ["identity", "residual"])
+def test_interpolator_mode_ablation_reaches_dnt_and_dgnt_factories(mode):
+    from run_experiment import _create_method
+
+    for name in ("dnt", "dgnt"):
+        config = _explicit_ablation_config(name, f"interpolator_{mode}")
+        config["loss"]["interpolation_mode"] = mode
+
+        validate_experiment_config(config)
+        method = _create_method(config, source_domains=5)
+
+        assert method.interpolation_mode == mode
+
+
+def test_endpoint_sqrt_normalization_ablation_reaches_method_factory():
+    from run_experiment import _create_method
+
+    config = _explicit_ablation_config("dnt", "endpoint_sqrt")
+    config["loss"]["endpoint_normalization"] = "sqrt_latent"
+
+    validate_experiment_config(config)
+    method = _create_method(config, source_domains=5)
+
+    assert method.endpoint_normalization == "sqrt_latent"
+
+
+def test_two_step_is_allowed_only_as_an_explicit_dger_family_ablation():
+    config = _explicit_ablation_config("dger", "two_step")
+    config["update_schedule"] = "two_step"
+
+    validate_experiment_config(config)
+
+    config.pop("ablation")
+    with pytest.raises(ValueError, match="explicit ablation"):
+        validate_experiment_config(config)
+
+
+def test_ablation_config_rejects_unknown_variant_names():
+    config = _explicit_ablation_config("dnt", "invented_variant")
+
+    with pytest.raises(ValueError, match="recognized ablation variant"):
+        validate_experiment_config(config)
+
+
+def test_ablation_name_must_match_its_exact_scientific_delta():
+    config = _explicit_ablation_config("dnt", "lambda_0")
+    # The label claims lambda=0, but the actual loss remains the baseline.
+    config["loss"]["interpolation_lambda"] = 1.0
+
+    with pytest.raises(ValueError, match="lambda_0.*interpolation_lambda"):
+        validate_experiment_config(config)
+
+
+def test_one_factor_ablation_rejects_accidental_compound_changes():
+    config = _explicit_ablation_config("dnt", "interpolator_residual")
+    config["loss"]["interpolation_mode"] = "residual"
+    config["loss"]["endpoint_normalization"] = "sqrt_latent"
+
+    with pytest.raises(ValueError, match="one-factor|changed_knobs"):
+        validate_experiment_config(config)

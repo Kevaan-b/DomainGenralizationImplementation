@@ -84,3 +84,52 @@ def test_dnt_classification_loss_uses_left_endpoints_from_the_paired_batch():
     metrics = method.train_step(ordinary_batch, pair_batch)
 
     assert metrics["classification_loss"] == pytest.approx(expected.item())
+
+
+def test_sqrt_latent_endpoint_normalization_removes_dimension_scaling():
+    displacement = torch.ones(2, 64)
+    expected_displacement = torch.zeros_like(displacement)
+
+    loss = endpoint_loss(
+        displacement, expected_displacement, normalization="sqrt_latent",
+    )
+
+    assert torch.allclose(loss, torch.tensor(1.0))
+
+
+def test_identity_interpolator_returns_displacement_without_trainable_branch():
+    interpolator = LatentInterpolator(mode="identity")
+    displacement = torch.randn(4, 64)
+
+    transformed = interpolator(displacement)
+
+    assert torch.equal(transformed, displacement)
+    assert not any(parameter.requires_grad for parameter in interpolator.parameters())
+
+
+def test_residual_interpolator_is_identity_initialized_but_trainable():
+    interpolator = LatentInterpolator(mode="residual")
+    displacement = torch.randn(4, 64)
+
+    transformed = interpolator(displacement)
+
+    assert torch.equal(transformed, displacement)
+    assert any(parameter.requires_grad for parameter in interpolator.parameters())
+
+
+def test_lambda_zero_ablation_reduces_dnt_objective_to_left_classification():
+    from dg.methods.dnt import DNT
+
+    torch.manual_seed(4)
+    method = DNT(
+        {"lr": 0.0, "momentum": 0.0, "weight_decay": 0.0}, loss_weight=0.0,
+    )
+    pair_batch = {
+        "left_image": torch.randn(4, 1, 28, 28),
+        "right_image": torch.randn(4, 1, 28, 28),
+        "label": torch.tensor([0, 1, 2, 3]),
+    }
+
+    metrics = method.train_step({}, pair_batch)
+
+    assert metrics["loss"] == pytest.approx(metrics["classification_loss"])

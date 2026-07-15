@@ -20,23 +20,33 @@ def interpolation_path(start: Tensor, displacement: Tensor, weights: Iterable[fl
     return tuple(start + float(weight) * displacement for weight in weights)
 
 
-def endpoint_loss(displacement: Tensor, expected_displacement: Tensor) -> Tensor:
+def endpoint_loss(
+    displacement: Tensor, expected_displacement: Tensor,
+    normalization: str = "none",
+) -> Tensor:
     """Equation 4's expected Euclidean endpoint error."""
     error = displacement - expected_displacement
     if error.ndim < 2:
         raise ValueError("Endpoint displacements must include batch and feature dimensions.")
-    return torch.linalg.vector_norm(error.flatten(start_dim=1), ord=2, dim=1).mean()
+    if normalization not in {"none", "sqrt_latent"}:
+        raise ValueError("Endpoint normalization must be none or sqrt_latent.")
+    flattened = error.flatten(start_dim=1)
+    loss = torch.linalg.vector_norm(flattened, ord=2, dim=1).mean()
+    if normalization == "sqrt_latent":
+        loss = loss / flattened.shape[1] ** .5
+    return loss
 
 
 def interpolation_loss(
     classifier: nn.Module, start: Tensor, end: Tensor, labels: Tensor,
     interpolator: nn.Module, weights: Iterable[float],
+    endpoint_normalization: str = "none",
 ) -> InterpolationLoss:
     """Classify every prescribed path point and enforce endpoint consistency."""
     displacement = interpolator(end - start)
     points = interpolation_path(start, displacement, weights)
     path = torch.stack([functional.cross_entropy(classifier(point), labels) for point in points]).mean()
-    endpoint = endpoint_loss(displacement, end - start)
+    endpoint = endpoint_loss(displacement, end - start, endpoint_normalization)
     return InterpolationLoss(total=path + endpoint, path=path, endpoint=endpoint)
 
 
