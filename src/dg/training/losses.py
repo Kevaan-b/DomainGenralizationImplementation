@@ -23,13 +23,20 @@ def interpolation_path(start: Tensor, displacement: Tensor, weights: Iterable[fl
 def endpoint_loss(
     displacement: Tensor, expected_displacement: Tensor,
     normalization: str = "none",
+    mode: str = "mean_sample_l2",
 ) -> Tensor:
-    """Equation 4's expected Euclidean endpoint error."""
+    """Evaluate either historical endpoint objective exactly."""
     error = displacement - expected_displacement
     if error.ndim < 2:
         raise ValueError("Endpoint displacements must include batch and feature dimensions.")
+    if mode not in {"mean_sample_l2", "mse_mean_all"}:
+        raise ValueError("Endpoint loss mode must be mean_sample_l2 or mse_mean_all.")
     if normalization not in {"none", "sqrt_latent"}:
         raise ValueError("Endpoint normalization must be none or sqrt_latent.")
+    if mode == "mse_mean_all":
+        if normalization != "none":
+            raise ValueError("Historical MSE endpoint loss does not use normalization.")
+        return functional.mse_loss(displacement, expected_displacement)
     flattened = error.flatten(start_dim=1)
     loss = torch.linalg.vector_norm(flattened, ord=2, dim=1).mean()
     if normalization == "sqrt_latent":
@@ -41,12 +48,15 @@ def interpolation_loss(
     classifier: nn.Module, start: Tensor, end: Tensor, labels: Tensor,
     interpolator: nn.Module, weights: Iterable[float],
     endpoint_normalization: str = "none",
+    endpoint_loss_mode: str = "mean_sample_l2",
 ) -> InterpolationLoss:
     """Classify every prescribed path point and enforce endpoint consistency."""
     displacement = interpolator(end - start)
     points = interpolation_path(start, displacement, weights)
     path = torch.stack([functional.cross_entropy(classifier(point), labels) for point in points]).mean()
-    endpoint = endpoint_loss(displacement, end - start, endpoint_normalization)
+    endpoint = endpoint_loss(
+        displacement, end - start, endpoint_normalization, endpoint_loss_mode,
+    )
     return InterpolationLoss(total=path + endpoint, path=path, endpoint=endpoint)
 
 

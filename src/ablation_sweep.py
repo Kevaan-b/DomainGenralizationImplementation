@@ -62,6 +62,7 @@ def _code_fingerprint(repo_root: Path) -> str:
 
 def _variant(
     base: dict[str, Any], method: str, name: str, question: str,
+    matrix: str | None = None,
 ) -> dict[str, Any]:
     configuration = deepcopy(base)
     configuration["method"] = method
@@ -72,11 +73,63 @@ def _variant(
         "scientific_question": question,
         "changed_knobs": [],
     }
+    if matrix is not None:
+        configuration["ablation"]["matrix"] = matrix
     return configuration
 
 
-def build_ablation_configs(
+def _endpoint_history_configs(
     base: dict[str, Any], method: str,
+) -> list[dict[str, Any]]:
+    matrix = "endpoint_history"
+    if method in {"deepall", "dger"}:
+        name = "deepall_shared_control" if method == "deepall" else "dger_shared_control"
+        control = _variant(
+            base, method, name,
+            f"Shared {method.upper()} reference without an endpoint objective.",
+            matrix,
+        )
+        control["ablation"].update({
+            "factorial_member": False,
+            "control_for": "dnt" if method == "deepall" else "dgnt",
+        })
+        return [control]
+
+    cells = (
+        ("hist_mlp_mse", "mlp_3x64", "mse_mean_all", "5bb27a5"),
+        ("hist_mlp_l2", "mlp_3x64", "mean_sample_l2", None),
+        ("hist_conv_mse", "conv1d_3layer", "mse_mean_all", None),
+        ("hist_conv_l2", "conv1d_3layer", "mean_sample_l2", "7264861"),
+    )
+    configurations = []
+    for name, architecture, endpoint_mode, historical_match in cells:
+        config = _variant(
+            base, method, name,
+            "Which historical interpolator architecture and endpoint reduction "
+            "caused the DNT/DGNT performance change?",
+            matrix,
+        )
+        config["loss"].update({
+            "interpolation_mode": architecture,
+            "endpoint_loss": endpoint_mode,
+            "endpoint_normalization": "none",
+        })
+        changed = []
+        if architecture == "mlp_3x64":
+            changed.append("loss.interpolation_mode")
+        if endpoint_mode == "mse_mean_all":
+            changed.append("loss.endpoint_loss")
+        config["ablation"].update({
+            "changed_knobs": changed,
+            "factorial_member": True,
+            "historical_match": historical_match,
+        })
+        configurations.append(config)
+    return configurations
+
+
+def build_ablation_configs(
+    base: dict[str, Any], method: str, matrix: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return immutable, mostly one-factor diagnostic variants for one method."""
     if method not in METHODS:
@@ -85,6 +138,10 @@ def build_ablation_configs(
     base.setdefault("loss", {})
     base["loss"].setdefault("interpolation_mode", "learned")
     base["loss"].setdefault("endpoint_normalization", "none")
+    if matrix not in {None, "endpoint_history"}:
+        raise ValueError("matrix must be endpoint_history when provided.")
+    if matrix == "endpoint_history":
+        return _endpoint_history_configs(base, method)
     if method == "deepall":
         return [_variant(
             base, method, "control",
@@ -206,6 +263,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
+        "--matrix", choices=("endpoint_history",),
+        help="Run a named focused matrix instead of the default diagnostics.",
+    )
+    parser.add_argument(
         "--methods", nargs="+", choices=METHODS,
         default=["deepall", "dnt", "dger"],
         help="Default screens controls and components; add dgnt after they are stable.",
@@ -250,7 +311,7 @@ def main() -> None:
     )
 
     variants_by_method = {
-        method: build_ablation_configs(base, method)
+        method: build_ablation_configs(base, method, matrix=arguments.matrix)
         for method in arguments.methods
     }
     if arguments.variants:
@@ -316,10 +377,11 @@ def main() -> None:
     seed_key = "-".join(str(value) for value in arguments.seeds)
     method_key = "-".join(arguments.methods)
     variant_key = "-".join(arguments.variants or ["all"])
+    matrix_key = arguments.matrix or "diagnostic"
     summary_path = (
         results_root / base["track"] / "ablations"
         / (
-            f"summary_methods_{method_key}_variants_{variant_key}_targets_{target_key}_"
+            f"summary_matrix_{matrix_key}_methods_{method_key}_variants_{variant_key}_targets_{target_key}_"
             f"seeds_{seed_key}_budget_{arguments.data_budget}.txt"
         )
     )

@@ -13,7 +13,7 @@ from .dger import DGER, TensorBatch, _set_grad
 
 
 class DGNT(DGER):
-    def __init__(self, num_domains: int, optimizer_kwargs: dict[str, object], alpha_1: float = .5, alpha_2: float = .005, alpha_3: float = .01, interpolation_lambda: float = 1., weights: Iterable[float] = (0., .25, .5, .75, 1.), auxiliary_lr: float | None = None, domain_reduction: str = "sum", interpolation_mode: str = "learned", endpoint_normalization: str = "none") -> None:
+    def __init__(self, num_domains: int, optimizer_kwargs: dict[str, object], alpha_1: float = .5, alpha_2: float = .005, alpha_3: float = .01, interpolation_lambda: float = 1., weights: Iterable[float] = (0., .25, .5, .75, 1.), auxiliary_lr: float | None = None, domain_reduction: str = "sum", interpolation_mode: str = "learned", endpoint_normalization: str = "none", endpoint_loss_mode: str = "mean_sample_l2") -> None:
         super().__init__(num_domains, optimizer_kwargs, alpha_1, alpha_2, alpha_3, auxiliary_lr, domain_reduction)
         self.interpolator = LatentInterpolator(mode=interpolation_mode)
         primary_parameters = list(self.network.parameters()) + list(self.auxiliaries.discriminator.parameters()) + list(self.interpolator.parameters())
@@ -25,6 +25,7 @@ class DGNT(DGER):
         self.interpolation_lambda, self.weights = interpolation_lambda, tuple(weights)
         self.interpolation_mode = interpolation_mode
         self.endpoint_normalization = endpoint_normalization
+        self.endpoint_loss_mode = endpoint_loss_mode
 
     def _primary_additional_loss(
         self, pair_batch: TensorBatch | None,
@@ -38,6 +39,7 @@ class DGNT(DGER):
         interpolation = interpolation_loss(
             self.network.classifier, start, end, pair_batch["label"],
             self.interpolator, self.weights, self.endpoint_normalization,
+            self.endpoint_loss_mode,
         )
         weighted = self.interpolation_lambda * interpolation.total
         return weighted, {
@@ -58,6 +60,7 @@ class DGNT(DGER):
         interpolation = interpolation_loss(
             self.network.classifier, start, end, pair_batch["label"],
             self.interpolator, self.weights, self.endpoint_normalization,
+            self.endpoint_loss_mode,
         )
         total = dger_total + self.interpolation_lambda * interpolation.total
         self.main_optimizer.zero_grad(set_to_none=True)

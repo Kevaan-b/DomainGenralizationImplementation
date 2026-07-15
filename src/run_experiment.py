@@ -65,6 +65,7 @@ def _create_method(config: dict[str, Any], source_domains: int):
             optimizer, loss["interpolation_lambda"], loss["interpolation_weights"],
             loss.get("interpolation_mode", "learned"),
             loss.get("endpoint_normalization", "none"),
+            loss.get("endpoint_loss", "mean_sample_l2"),
         )
     arguments = {"alpha_1": loss["dger_alpha_1"], "alpha_2": loss["dger_alpha_2"], "alpha_3": loss["dger_alpha_3"], "auxiliary_lr": optimizer.pop("auxiliary_lr", None), "domain_reduction": "sum" if config["track"] == "dger_original" else "mean"}
     if config["method"] == "dger":
@@ -76,6 +77,7 @@ def _create_method(config: dict[str, Any], source_domains: int):
             weights=loss["interpolation_weights"],
             interpolation_mode=loss.get("interpolation_mode", "learned"),
             endpoint_normalization=loss.get("endpoint_normalization", "none"),
+            endpoint_loss_mode=loss.get("endpoint_loss", "mean_sample_l2"),
             **arguments,
         )
     raise ValueError(f"Unsupported method: {config['method']}")
@@ -134,8 +136,11 @@ def main() -> None:
     update_schedule = config.get("update_schedule", "method_faithful")
     interpolation_mode = config["loss"].get("interpolation_mode", "learned")
     endpoint_normalization = config["loss"].get("endpoint_normalization", "none")
+    endpoint_loss_mode = config["loss"].get("endpoint_loss", "mean_sample_l2")
     interpolator_description = {
         "learned": "learned Conv1d interpolator (channels=64, kernel_size=3, padding=1)",
+        "conv1d_3layer": "historical three-layer Conv1d interpolator",
+        "mlp_3x64": "historical Linear(64,64)-ReLU three-layer interpolator",
         "identity": "fixed identity/linear latent interpolation",
         "residual": "zero-initialized residual Conv1d interpolator",
     }[interpolation_mode]
@@ -147,6 +152,7 @@ def main() -> None:
         reconstruction_choices.extend([
             "five-point uniform interpolation grid",
             interpolator_description,
+            f"endpoint loss: {endpoint_loss_mode}",
             f"endpoint normalization: {endpoint_normalization}",
             "DNT/DGNT batch size 64 interpreted as 64 pairs",
         ])

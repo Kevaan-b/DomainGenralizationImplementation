@@ -17,12 +17,23 @@ class LatentInterpolator(nn.Module):
         mode: str = "learned",
     ) -> None:
         super().__init__()
-        if mode not in {"learned", "identity", "residual"}:
-            raise ValueError("Interpolator mode must be learned, identity, or residual.")
+        if mode not in {
+            "learned", "conv1d_3layer", "mlp_3x64", "identity", "residual",
+        }:
+            raise ValueError(
+                "Interpolator mode must be learned, conv1d_3layer, mlp_3x64, "
+                "identity, or residual."
+            )
         self.latent_size = latent_size
         self.mode = mode
         if mode == "identity":
             self.network = nn.Identity()
+        elif mode == "mlp_3x64":
+            self.network = nn.Sequential(
+                nn.Linear(latent_size, latent_size), nn.ReLU(),
+                nn.Linear(latent_size, latent_size), nn.ReLU(),
+                nn.Linear(latent_size, latent_size),
+            )
         else:
             self.network = nn.Sequential(
                 nn.Conv1d(1, hidden_channels, kernel_size=3, padding=1), nn.ReLU(),
@@ -44,5 +55,7 @@ class LatentInterpolator(nn.Module):
             )
         if self.mode == "identity":
             return displacement
+        if self.mode == "mlp_3x64":
+            return self.network(displacement)
         transformed = self.network(displacement.unsqueeze(1)).squeeze(1)
         return displacement + transformed if self.mode == "residual" else transformed

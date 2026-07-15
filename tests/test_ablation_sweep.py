@@ -84,6 +84,50 @@ def test_dgnt_ablation_matrix_includes_interpolation_and_schedule_controls():
     }
 
 
+def test_endpoint_history_matrix_is_exact_cartesian_product_for_dnt_and_dgnt():
+    from ablation_sweep import build_ablation_configs
+
+    expected = [
+        ("hist_mlp_mse", "mlp_3x64", "mse_mean_all"),
+        ("hist_mlp_l2", "mlp_3x64", "mean_sample_l2"),
+        ("hist_conv_mse", "conv1d_3layer", "mse_mean_all"),
+        ("hist_conv_l2", "conv1d_3layer", "mean_sample_l2"),
+    ]
+
+    for method in ("dnt", "dgnt"):
+        configurations = build_ablation_configs(
+            _base_config(), method=method, matrix="endpoint_history",
+        )
+
+        assert [
+            (
+                config["ablation"]["name"],
+                config["loss"]["interpolation_mode"],
+                config["loss"]["endpoint_loss"],
+            )
+            for config in configurations
+        ] == expected
+        assert all(
+            config["ablation"].get("matrix") == "endpoint_history"
+            for config in configurations
+        )
+
+
+def test_endpoint_history_matrix_gives_dger_one_unchanged_alternating_reference():
+    from ablation_sweep import build_ablation_configs
+
+    configurations = build_ablation_configs(
+        _base_config(), method="dger", matrix="endpoint_history",
+    )
+
+    assert len(configurations) == 1
+    reference = configurations[0]
+    assert reference["ablation"]["name"] == "dger_shared_control"
+    assert reference["ablation"].get("matrix") == "endpoint_history"
+    assert reference["ablation"]["changed_knobs"] == []
+    assert reference["update_schedule"] == "method_faithful"
+
+
 def test_ablation_run_directory_prevents_variants_from_overwriting_each_other():
     from ablation_sweep import ablation_run_dir
 
@@ -177,6 +221,7 @@ def test_dry_run_prints_commands_without_creating_files_or_directories(
     before = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
     monkeypatch.setattr(ablation_sweep, "parse_args", lambda: Namespace(
         config=config_path,
+        matrix=None,
         methods=["dnt"],
         target_angles=[30],
         seeds=[0],
@@ -197,6 +242,39 @@ def test_dry_run_prints_commands_without_creating_files_or_directories(
     after = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
     assert after == before
     assert "run_experiment.py" in capsys.readouterr().out
+
+
+def test_endpoint_history_selector_reaches_dry_run_commands(
+    tmp_path, monkeypatch, capsys,
+):
+    import ablation_sweep
+
+    base = _base_config()
+    base["results_root"] = str(tmp_path / "results")
+    config_path = tmp_path / "base.yaml"
+    config_path.write_text(yaml.safe_dump(base))
+    monkeypatch.setattr(ablation_sweep, "parse_args", lambda: Namespace(
+        config=config_path,
+        matrix="endpoint_history",
+        methods=["dnt", "dger"],
+        target_angles=[75],
+        seeds=[0],
+        data_budget=0.1,
+        variants=None,
+        skip_existing=False,
+        dry_run=True,
+    ))
+
+    ablation_sweep.main()
+
+    commands = capsys.readouterr().out.splitlines()
+    assert len(commands) == 5
+    assert all("run_experiment.py" in command for command in commands)
+    assert any("hist_mlp_mse" in command for command in commands)
+    assert any("hist_mlp_l2" in command for command in commands)
+    assert any("hist_conv_mse" in command for command in commands)
+    assert any("hist_conv_l2" in command for command in commands)
+    assert any("dger_shared_control" in command for command in commands)
 
 
 def test_summary_reports_seed_statistics_separately_for_each_target():

@@ -178,3 +178,56 @@ def test_one_factor_ablation_rejects_accidental_compound_changes():
 
     with pytest.raises(ValueError, match="one-factor|changed_knobs"):
         validate_experiment_config(config)
+
+
+@pytest.mark.parametrize("method", ["dnt", "dgnt"])
+@pytest.mark.parametrize(
+    ("name", "interpolation_mode", "endpoint_loss", "changed_knobs"),
+    [
+        (
+            "hist_mlp_mse", "mlp_3x64", "mse_mean_all",
+            ["loss.interpolation_mode", "loss.endpoint_loss"],
+        ),
+        (
+            "hist_mlp_l2", "mlp_3x64", "mean_sample_l2",
+            ["loss.interpolation_mode"],
+        ),
+        (
+            "hist_conv_mse", "conv1d_3layer", "mse_mean_all",
+            ["loss.endpoint_loss"],
+        ),
+        ("hist_conv_l2", "conv1d_3layer", "mean_sample_l2", []),
+    ],
+)
+def test_endpoint_history_configs_validate_and_reach_method_factory(
+    method, name, interpolation_mode, endpoint_loss, changed_knobs,
+):
+    from run_experiment import _create_method
+
+    config = _explicit_ablation_config(method, name)
+    config["ablation"].update({
+        "matrix": "endpoint_history",
+        "changed_knobs": changed_knobs,
+        "factorial_member": True,
+    })
+    config["loss"].update({
+        "interpolation_mode": interpolation_mode,
+        "endpoint_loss": endpoint_loss,
+    })
+
+    validate_experiment_config(config)
+    created = _create_method(config, source_domains=5)
+
+    assert created.interpolation_mode == interpolation_mode
+    assert created.endpoint_loss_mode == endpoint_loss
+
+
+def test_endpoint_history_dger_reference_validates_as_unchanged_alternating_control():
+    config = _explicit_ablation_config("dger", "dger_shared_control")
+    config["ablation"].update({
+        "matrix": "endpoint_history",
+        "changed_knobs": [],
+        "factorial_member": False,
+    })
+
+    validate_experiment_config(config)

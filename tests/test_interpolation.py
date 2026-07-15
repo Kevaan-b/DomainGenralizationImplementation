@@ -60,6 +60,39 @@ def test_reported_interpolator_has_three_convolutional_layers_and_preserves_vect
     assert transformed.shape == displacement.shape
 
 
+def test_historical_mlp_interpolator_has_exact_three_by_64_architecture():
+    interpolator = LatentInterpolator(latent_size=64, mode="mlp_3x64")
+    displacement = torch.randn(4, 64)
+
+    transformed = interpolator(displacement)
+
+    assert [type(module) for module in interpolator.network] == [
+        torch.nn.Linear, torch.nn.ReLU, torch.nn.Linear,
+        torch.nn.ReLU, torch.nn.Linear,
+    ]
+    linear_layers = [
+        module for module in interpolator.network
+        if isinstance(module, torch.nn.Linear)
+    ]
+    assert [(layer.in_features, layer.out_features) for layer in linear_layers] == [
+        (64, 64), (64, 64), (64, 64),
+    ]
+    assert sum(parameter.numel() for parameter in interpolator.parameters()) == 12_480
+    assert transformed.shape == displacement.shape
+
+
+def test_historical_endpoint_mse_is_exact_elementwise_mean_squared_error():
+    displacement = torch.tensor([[3.0, 4.0], [0.0, 12.0]])
+    expected_displacement = torch.zeros_like(displacement)
+
+    loss = endpoint_loss(
+        displacement, expected_displacement, mode="mse_mean_all",
+    )
+
+    assert torch.equal(loss, functional.mse_loss(displacement, expected_displacement))
+    assert loss.item() == pytest.approx(42.25)
+
+
 def test_dnt_classification_loss_uses_left_endpoints_from_the_paired_batch():
     from dg.methods.dnt import DNT
 

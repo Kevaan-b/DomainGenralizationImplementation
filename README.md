@@ -111,6 +111,21 @@ stabilizer update and one main-model update. It is diagnostic rather than the
 official RotatedMNIST schedule. Result paths include a full configuration and
 source-code fingerprint so `--skip-existing` cannot silently reuse stale runs.
 
+To isolate the historical DNT/DGNT change, run the endpoint-history matrix:
+
+```bash
+PYTHONPATH=src .venv/bin/python src/ablation_sweep.py \
+  --config configs/rotated_mnist_target.yaml \
+  --matrix endpoint_history --methods dnt dger dgnt \
+  --target-angles 30 75 --seeds 0 --data-budget 1.0
+```
+
+For DNT and DGNT this crosses the historical three-layer MLP versus Conv1d
+interpolator with historical all-element MSE versus mean per-example L2
+endpoint loss. DGER is run once per target and seed as a shared reference; it
+has no interpolator or endpoint loss. All cells retain the current data,
+pairing, optimizer, path loss, and update protocols.
+
 ## Run artifacts and evaluation policy
 
 Comparison runs record per-epoch losses, source validation per angle, `last.pt`,

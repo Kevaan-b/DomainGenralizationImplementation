@@ -10,6 +10,75 @@ METHODS = frozenset({"deepall", "dnt", "dger", "dgnt"})
 DATA_BUDGETS = frozenset({1.0, 0.2, 0.1, 0.05})
 
 
+def _validate_endpoint_history_contract(config: dict[str, Any]) -> None:
+    ablation = config["ablation"]
+    method = config["method"]
+    name = ablation.get("name")
+    if method in {"deepall", "dger"}:
+        expected_name = f"{method}_shared_control"
+        if name != expected_name or ablation.get("changed_knobs") != []:
+            raise ValueError(
+                f"Endpoint-history {method} requires the unchanged {expected_name}."
+            )
+        if config.get("update_schedule") != "method_faithful":
+            raise ValueError("Endpoint-history controls require method_faithful updates.")
+        if ablation.get("factorial_member") is not False:
+            raise ValueError("Endpoint-history controls are not factorial members.")
+        if method == "dger":
+            alphas = tuple(float(config["loss"].get(key, -1)) for key in (
+                "dger_alpha_1", "dger_alpha_2", "dger_alpha_3",
+            ))
+            if alphas != (0.5, 0.005, 0.01):
+                raise ValueError("The DGER shared control requires fixed paper weights.")
+        return
+
+    cells = {
+        "hist_mlp_mse": (
+            "mlp_3x64", "mse_mean_all",
+            ["loss.interpolation_mode", "loss.endpoint_loss"],
+        ),
+        "hist_mlp_l2": (
+            "mlp_3x64", "mean_sample_l2", ["loss.interpolation_mode"],
+        ),
+        "hist_conv_mse": (
+            "conv1d_3layer", "mse_mean_all", ["loss.endpoint_loss"],
+        ),
+        "hist_conv_l2": ("conv1d_3layer", "mean_sample_l2", []),
+    }
+    if name not in cells:
+        raise ValueError(f"{name!r} is not a recognized endpoint-history cell.")
+    architecture, endpoint_mode, changed_knobs = cells[name]
+    loss = config["loss"]
+    actual = (loss.get("interpolation_mode"), loss.get("endpoint_loss"))
+    if actual != (architecture, endpoint_mode):
+        raise ValueError(
+            f"{name} requires interpolation_mode={architecture} and "
+            f"endpoint_loss={endpoint_mode}."
+        )
+    if ablation.get("changed_knobs") != changed_knobs:
+        raise ValueError(
+            f"{name} requires factorial changed_knobs={changed_knobs}."
+        )
+    if ablation.get("factorial_member") is not True:
+        raise ValueError("Endpoint-history cells must be marked as factorial members.")
+    if float(loss.get("interpolation_lambda", -1)) != 1.0:
+        raise ValueError("Endpoint-history cells require interpolation lambda 1.")
+    if loss.get("endpoint_normalization", "none") != "none":
+        raise ValueError("Endpoint-history cells do not normalize the endpoint loss.")
+    if tuple(float(value) for value in loss.get("interpolation_weights", ())) != (
+        0.0, 0.25, 0.5, 0.75, 1.0,
+    ):
+        raise ValueError("Endpoint-history cells require the fixed five-point grid.")
+    if method == "dgnt":
+        alphas = tuple(float(loss.get(key, -1)) for key in (
+            "dger_alpha_1", "dger_alpha_2", "dger_alpha_3",
+        ))
+        if alphas != (0.5, 0.005, 0.01):
+            raise ValueError("Endpoint-history DGNT cells require fixed DGER weights.")
+    if config.get("update_schedule") != "method_faithful":
+        raise ValueError("Endpoint-history cells require method_faithful updates.")
+
+
 def _validate_ablation_contract(config: dict[str, Any]) -> None:
     """Lock diagnostic labels to the exact one-factor settings they claim."""
     ablation = config.get("ablation")
@@ -22,6 +91,12 @@ def _validate_ablation_contract(config: dict[str, Any]) -> None:
     question = ablation.get("scientific_question")
     if not isinstance(question, str) or not question.strip():
         raise ValueError("Ablations require a non-empty scientific_question.")
+    matrix = ablation.get("matrix")
+    if matrix == "endpoint_history":
+        _validate_endpoint_history_contract(config)
+        return
+    if matrix is not None:
+        raise ValueError(f"Unknown ablation matrix: {matrix!r}.")
 
     method = config["method"]
     name = ablation.get("name")
@@ -70,12 +145,18 @@ def _validate_ablation_contract(config: dict[str, Any]) -> None:
                 "interpolator_identity": "identity",
                 "interpolator_residual": "residual",
             }.get(name, "learned"),
+            "endpoint_loss": "mean_sample_l2",
             "endpoint_normalization": (
                 "sqrt_latent" if name == "endpoint_sqrt" else "none"
             ),
         }
         for key, expected in expected_interpolation.items():
-            default = "learned" if key == "interpolation_mode" else "none"
+            defaults = {
+                "interpolation_mode": "learned",
+                "endpoint_loss": "mean_sample_l2",
+                "endpoint_normalization": "none",
+            }
+            default = defaults.get(key)
             actual = loss.get(key, default)
             if actual != expected:
                 raise ValueError(
@@ -178,13 +259,20 @@ def validate_experiment_config(config: dict[str, Any]) -> None:
             if any(difference <= 0 for difference in differences) or max(differences) - min(differences) > 1e-8:
                 raise ValueError("Interpolation weights must be a strictly increasing uniform grid.")
             interpolation_mode = loss.get("interpolation_mode", "learned")
-            if interpolation_mode not in {"learned", "identity", "residual"}:
-                raise ValueError("Interpolation mode must be learned, identity, or residual.")
+            if interpolation_mode not in {
+                "learned", "conv1d_3layer", "mlp_3x64", "identity", "residual",
+            }:
+                raise ValueError("Unsupported interpolation mode.")
+            endpoint_mode = loss.get("endpoint_loss", "mean_sample_l2")
+            if endpoint_mode not in {"mean_sample_l2", "mse_mean_all"}:
+                raise ValueError("Unsupported endpoint loss mode.")
             endpoint_normalization = loss.get("endpoint_normalization", "none")
             if endpoint_normalization not in {"none", "sqrt_latent"}:
                 raise ValueError("Endpoint normalization must be none or sqrt_latent.")
             if not is_ablation and (
-                interpolation_mode != "learned" or endpoint_normalization != "none"
+                interpolation_mode not in {"learned", "conv1d_3layer"}
+                or endpoint_mode != "mean_sample_l2"
+                or endpoint_normalization != "none"
             ):
                 raise ValueError("Nonstandard interpolation settings require an explicit ablation.")
         if config["method"] in {"dger", "dgnt"}:
