@@ -93,6 +93,24 @@ def test_historical_endpoint_mse_is_exact_elementwise_mean_squared_error():
     assert loss.item() == pytest.approx(42.25)
 
 
+@pytest.mark.parametrize("endpoint_weight", [1.0, 0.125, 0.015625, 0.01])
+def test_interpolation_total_weights_only_endpoint_term(endpoint_weight):
+    classifier = torch.nn.Linear(2, 2)
+    interpolator = LatentInterpolator(latent_size=2, mode="identity")
+    start = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    end = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
+    labels = torch.tensor([0, 1])
+
+    loss = interpolation_loss(
+        classifier, start, end, labels, interpolator, (0.0, 1.0),
+        endpoint_weight=endpoint_weight,
+    )
+
+    assert torch.allclose(
+        loss.total, loss.path + endpoint_weight * loss.endpoint,
+    )
+
+
 def test_dnt_classification_loss_uses_left_endpoints_from_the_paired_batch():
     from dg.methods.dnt import DNT
 

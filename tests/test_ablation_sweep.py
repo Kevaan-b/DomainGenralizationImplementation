@@ -128,6 +128,58 @@ def test_endpoint_history_matrix_gives_dger_one_unchanged_alternating_reference(
     assert reference["update_schedule"] == "method_faithful"
 
 
+def test_endpoint_scale_matrix_crosses_two_architectures_with_four_weights():
+    from ablation_sweep import build_ablation_configs
+
+    expected = [
+        ("scale_mlp_1", "mlp_3x64", 1.0),
+        ("scale_mlp_1_over_8", "mlp_3x64", 0.125),
+        ("scale_mlp_1_over_64", "mlp_3x64", 0.015625),
+        ("scale_mlp_0_01", "mlp_3x64", 0.01),
+        ("scale_conv_1", "conv1d_3layer", 1.0),
+        ("scale_conv_1_over_8", "conv1d_3layer", 0.125),
+        ("scale_conv_1_over_64", "conv1d_3layer", 0.015625),
+        ("scale_conv_0_01", "conv1d_3layer", 0.01),
+    ]
+
+    for method in ("dnt", "dgnt"):
+        configurations = build_ablation_configs(
+            _base_config(), method=method, matrix="endpoint_scale",
+        )
+
+        assert [
+            (
+                config["ablation"]["name"],
+                config["loss"]["interpolation_mode"],
+                config["loss"]["endpoint_weight"],
+            )
+            for config in configurations
+        ] == expected
+        assert all(
+            config["ablation"].get("matrix") == "endpoint_scale"
+            and config["loss"]["endpoint_loss"] == "mean_sample_l2"
+            for config in configurations
+        )
+
+
+def test_endpoint_scale_matrix_has_one_deepall_and_one_dger_shared_control():
+    from ablation_sweep import build_ablation_configs
+
+    for method, expected_name in (
+        ("deepall", "deepall_shared_control"),
+        ("dger", "dger_shared_control"),
+    ):
+        configurations = build_ablation_configs(
+            _base_config(), method=method, matrix="endpoint_scale",
+        )
+
+        assert len(configurations) == 1
+        assert configurations[0]["ablation"]["name"] == expected_name
+        assert configurations[0]["ablation"]["matrix"] == "endpoint_scale"
+        assert configurations[0]["ablation"]["changed_knobs"] == []
+        assert configurations[0]["update_schedule"] == "method_faithful"
+
+
 def test_ablation_run_directory_prevents_variants_from_overwriting_each_other():
     from ablation_sweep import ablation_run_dir
 
@@ -275,6 +327,41 @@ def test_endpoint_history_selector_reaches_dry_run_commands(
     assert any("hist_conv_mse" in command for command in commands)
     assert any("hist_conv_l2" in command for command in commands)
     assert any("dger_shared_control" in command for command in commands)
+
+
+def test_endpoint_scale_selector_dry_run_emits_all_cells_and_controls(
+    tmp_path, monkeypatch, capsys,
+):
+    import ablation_sweep
+
+    base = _base_config()
+    base["results_root"] = str(tmp_path / "results")
+    config_path = tmp_path / "base.yaml"
+    config_path.write_text(yaml.safe_dump(base))
+    monkeypatch.setattr(ablation_sweep, "parse_args", lambda: Namespace(
+        config=config_path,
+        matrix="endpoint_scale",
+        methods=None,
+        target_angles=[75],
+        seeds=[0],
+        data_budget=0.1,
+        variants=None,
+        skip_existing=False,
+        dry_run=True,
+    ))
+
+    ablation_sweep.main()
+
+    commands = capsys.readouterr().out.splitlines()
+    assert len(commands) == 18
+    assert sum("deepall_shared_control" in command for command in commands) == 1
+    assert sum("dger_shared_control" in command for command in commands) == 1
+    for stem in (
+        "scale_mlp_1", "scale_mlp_1_over_8", "scale_mlp_1_over_64",
+        "scale_mlp_0_01", "scale_conv_1", "scale_conv_1_over_8",
+        "scale_conv_1_over_64", "scale_conv_0_01",
+    ):
+        assert any(stem in command for command in commands)
 
 
 def test_summary_reports_seed_statistics_separately_for_each_target():

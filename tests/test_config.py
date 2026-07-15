@@ -231,3 +231,78 @@ def test_endpoint_history_dger_reference_validates_as_unchanged_alternating_cont
     })
 
     validate_experiment_config(config)
+
+
+@pytest.mark.parametrize("method", ["dnt", "dgnt"])
+@pytest.mark.parametrize(
+    ("name", "interpolation_mode", "endpoint_weight", "changed_knobs"),
+    [
+        ("scale_mlp_1", "mlp_3x64", 1.0, ["loss.interpolation_mode"]),
+        (
+            "scale_mlp_1_over_8", "mlp_3x64", 0.125,
+            ["loss.interpolation_mode", "loss.endpoint_weight"],
+        ),
+        (
+            "scale_mlp_1_over_64", "mlp_3x64", 0.015625,
+            ["loss.interpolation_mode", "loss.endpoint_weight"],
+        ),
+        (
+            "scale_mlp_0_01", "mlp_3x64", 0.01,
+            ["loss.interpolation_mode", "loss.endpoint_weight"],
+        ),
+        ("scale_conv_1", "conv1d_3layer", 1.0, []),
+        (
+            "scale_conv_1_over_8", "conv1d_3layer", 0.125,
+            ["loss.endpoint_weight"],
+        ),
+        (
+            "scale_conv_1_over_64", "conv1d_3layer", 0.015625,
+            ["loss.endpoint_weight"],
+        ),
+        (
+            "scale_conv_0_01", "conv1d_3layer", 0.01,
+            ["loss.endpoint_weight"],
+        ),
+    ],
+)
+def test_endpoint_scale_configs_validate_and_propagate_to_factory(
+    method, name, interpolation_mode, endpoint_weight, changed_knobs,
+):
+    from run_experiment import _create_method
+
+    config = _explicit_ablation_config(method, name)
+    config["ablation"].update({
+        "matrix": "endpoint_scale",
+        "changed_knobs": changed_knobs,
+        "factorial_member": True,
+    })
+    config["loss"].update({
+        "interpolation_mode": interpolation_mode,
+        "endpoint_loss": "mean_sample_l2",
+        "endpoint_weight": endpoint_weight,
+    })
+
+    validate_experiment_config(config)
+    created = _create_method(config, source_domains=5)
+
+    assert created.interpolation_mode == interpolation_mode
+    assert created.endpoint_loss_mode == "mean_sample_l2"
+    assert created.endpoint_weight == endpoint_weight
+
+
+@pytest.mark.parametrize(
+    ("method", "name"),
+    [
+        ("deepall", "deepall_shared_control"),
+        ("dger", "dger_shared_control"),
+    ],
+)
+def test_endpoint_scale_shared_controls_validate_without_changed_knobs(method, name):
+    config = _explicit_ablation_config(method, name)
+    config["ablation"].update({
+        "matrix": "endpoint_scale",
+        "changed_knobs": [],
+        "factorial_member": False,
+    })
+
+    validate_experiment_config(config)

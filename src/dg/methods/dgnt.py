@@ -13,7 +13,7 @@ from .dger import DGER, TensorBatch, _set_grad
 
 
 class DGNT(DGER):
-    def __init__(self, num_domains: int, optimizer_kwargs: dict[str, object], alpha_1: float = .5, alpha_2: float = .005, alpha_3: float = .01, interpolation_lambda: float = 1., weights: Iterable[float] = (0., .25, .5, .75, 1.), auxiliary_lr: float | None = None, domain_reduction: str = "sum", interpolation_mode: str = "learned", endpoint_normalization: str = "none", endpoint_loss_mode: str = "mean_sample_l2") -> None:
+    def __init__(self, num_domains: int, optimizer_kwargs: dict[str, object], alpha_1: float = .5, alpha_2: float = .005, alpha_3: float = .01, interpolation_lambda: float = 1., weights: Iterable[float] = (0., .25, .5, .75, 1.), auxiliary_lr: float | None = None, domain_reduction: str = "sum", interpolation_mode: str = "learned", endpoint_normalization: str = "none", endpoint_loss_mode: str = "mean_sample_l2", endpoint_weight: float = 1.0) -> None:
         super().__init__(num_domains, optimizer_kwargs, alpha_1, alpha_2, alpha_3, auxiliary_lr, domain_reduction)
         self.interpolator = LatentInterpolator(mode=interpolation_mode)
         primary_parameters = list(self.network.parameters()) + list(self.auxiliaries.discriminator.parameters()) + list(self.interpolator.parameters())
@@ -26,6 +26,7 @@ class DGNT(DGER):
         self.interpolation_mode = interpolation_mode
         self.endpoint_normalization = endpoint_normalization
         self.endpoint_loss_mode = endpoint_loss_mode
+        self.endpoint_weight = endpoint_weight
 
     def _primary_additional_loss(
         self, pair_batch: TensorBatch | None,
@@ -39,7 +40,7 @@ class DGNT(DGER):
         interpolation = interpolation_loss(
             self.network.classifier, start, end, pair_batch["label"],
             self.interpolator, self.weights, self.endpoint_normalization,
-            self.endpoint_loss_mode,
+            self.endpoint_loss_mode, self.endpoint_weight,
         )
         weighted = self.interpolation_lambda * interpolation.total
         return weighted, {
@@ -47,6 +48,7 @@ class DGNT(DGER):
             "interpolation_loss": interpolation.total,
             "path_loss": interpolation.path,
             "endpoint_loss": interpolation.endpoint,
+            "weighted_endpoint_loss": interpolation.weighted_endpoint,
         }
 
     def train_step(self, batch: Mapping[str, Tensor], pair_batch: Mapping[str, Tensor] | None = None) -> dict[str, float]:
@@ -60,10 +62,10 @@ class DGNT(DGER):
         interpolation = interpolation_loss(
             self.network.classifier, start, end, pair_batch["label"],
             self.interpolator, self.weights, self.endpoint_normalization,
-            self.endpoint_loss_mode,
+            self.endpoint_loss_mode, self.endpoint_weight,
         )
         total = dger_total + self.interpolation_lambda * interpolation.total
         self.main_optimizer.zero_grad(set_to_none=True)
         total.backward()
         self.main_optimizer.step()
-        return {"loss": total.item(), "stabilizer_fit_loss": stabilizer.item(), **{key: value.item() for key, value in components.items()}, "interpolation_loss": interpolation.total.item(), "path_loss": interpolation.path.item(), "endpoint_loss": interpolation.endpoint.item(), "accuracy": (logits.argmax(1) == batch["label"]).float().mean().item()}
+        return {"loss": total.item(), "stabilizer_fit_loss": stabilizer.item(), **{key: value.item() for key, value in components.items()}, "interpolation_loss": interpolation.total.item(), "path_loss": interpolation.path.item(), "endpoint_loss": interpolation.endpoint.item(), "weighted_endpoint_loss": interpolation.weighted_endpoint.item(), "accuracy": (logits.argmax(1) == batch["label"]).float().mean().item()}

@@ -126,6 +126,20 @@ endpoint loss. DGER is run once per target and seed as a shared reference; it
 has no interpolator or endpoint loss. All cells retain the current data,
 pairing, optimizer, path loss, and update protocols.
 
+To test whether raw L2 is simply overweighted, run the endpoint-only scale
+matrix. It keeps path CE and the overall interpolation coefficient at 1, then
+crosses MLP/Conv1d with endpoint weights `1`, `1/8`, `1/64`, and `0.01`:
+
+```bash
+PYTHONPATH=src .venv/bin/python src/ablation_sweep.py \
+  --config configs/rotated_mnist_target.yaml \
+  --matrix endpoint_scale --methods deepall dnt dger dgnt \
+  --target-angles 30 --seeds 0 --data-budget 0.05
+```
+
+DeepAll and DGER each run once per target and seed as shared controls. The raw
+endpoint loss and its weighted contribution are both logged separately.
+
 ## Run artifacts and evaluation policy
 
 Comparison runs record per-epoch losses, source validation per angle, `last.pt`,

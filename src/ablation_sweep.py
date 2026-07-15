@@ -128,6 +128,59 @@ def _endpoint_history_configs(
     return configurations
 
 
+def _endpoint_scale_configs(
+    base: dict[str, Any], method: str,
+) -> list[dict[str, Any]]:
+    matrix = "endpoint_scale"
+    if method in {"deepall", "dger"}:
+        name = "deepall_shared_control" if method == "deepall" else "dger_shared_control"
+        control = _variant(
+            base, method, name,
+            f"Shared {method.upper()} reference without an endpoint objective.",
+            matrix,
+        )
+        control["ablation"].update({
+            "factorial_member": False,
+            "control_for": "dnt" if method == "deepall" else "dgnt",
+        })
+        return [control]
+
+    weights = (
+        ("1", 1.0),
+        ("1_over_8", 0.125),
+        ("1_over_64", 0.015625),
+        ("0_01", 0.01),
+    )
+    configurations = []
+    for architecture_name, architecture in (
+        ("mlp", "mlp_3x64"), ("conv", "conv1d_3layer"),
+    ):
+        for weight_name, endpoint_weight in weights:
+            name = f"scale_{architecture_name}_{weight_name}"
+            config = _variant(
+                base, method, name,
+                "How much raw L2 endpoint pressure is stable when path CE stays at one?",
+                matrix,
+            )
+            config["loss"].update({
+                "interpolation_mode": architecture,
+                "endpoint_loss": "mean_sample_l2",
+                "endpoint_normalization": "none",
+                "endpoint_weight": endpoint_weight,
+            })
+            changed = []
+            if architecture == "mlp_3x64":
+                changed.append("loss.interpolation_mode")
+            if endpoint_weight != 1.0:
+                changed.append("loss.endpoint_weight")
+            config["ablation"].update({
+                "changed_knobs": changed,
+                "factorial_member": True,
+            })
+            configurations.append(config)
+    return configurations
+
+
 def build_ablation_configs(
     base: dict[str, Any], method: str, matrix: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -138,10 +191,12 @@ def build_ablation_configs(
     base.setdefault("loss", {})
     base["loss"].setdefault("interpolation_mode", "learned")
     base["loss"].setdefault("endpoint_normalization", "none")
-    if matrix not in {None, "endpoint_history"}:
-        raise ValueError("matrix must be endpoint_history when provided.")
+    if matrix not in {None, "endpoint_history", "endpoint_scale"}:
+        raise ValueError("Unknown ablation matrix.")
     if matrix == "endpoint_history":
         return _endpoint_history_configs(base, method)
+    if matrix == "endpoint_scale":
+        return _endpoint_scale_configs(base, method)
     if method == "deepall":
         return [_variant(
             base, method, "control",
@@ -263,13 +318,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
-        "--matrix", choices=("endpoint_history",),
+        "--matrix", choices=("endpoint_history", "endpoint_scale"),
         help="Run a named focused matrix instead of the default diagnostics.",
     )
     parser.add_argument(
         "--methods", nargs="+", choices=METHODS,
-        default=["deepall", "dnt", "dger"],
-        help="Default screens controls and components; add dgnt after they are stable.",
+        help=(
+            "Methods to run. Focused matrices default to all four methods; "
+            "generic diagnostics default to deepall, dnt, and dger."
+        ),
     )
     parser.add_argument("--target-angles", nargs="+", type=int, choices=ANGLES, default=[30, 75])
     parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
@@ -282,13 +339,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     arguments = parse_args()
+    methods = arguments.methods or (
+        list(METHODS)
+        if arguments.matrix in {"endpoint_history", "endpoint_scale"}
+        else ["deepall", "dnt", "dger"]
+    )
     if len(set(arguments.seeds)) != len(arguments.seeds):
         raise ValueError("--seeds must be unique.")
     if any(seed < 0 for seed in arguments.seeds):
         raise ValueError("--seeds must be nonnegative.")
     if len(set(arguments.target_angles)) != len(arguments.target_angles):
         raise ValueError("--target-angles must be unique.")
-    if len(set(arguments.methods)) != len(arguments.methods):
+    if len(set(methods)) != len(methods):
         raise ValueError("--methods must be unique.")
     repo_root = Path(__file__).resolve().parents[1]
     base = yaml.safe_load(arguments.config.expanduser().resolve().read_text())
@@ -312,7 +374,7 @@ def main() -> None:
 
     variants_by_method = {
         method: build_ablation_configs(base, method, matrix=arguments.matrix)
-        for method in arguments.methods
+        for method in methods
     }
     if arguments.variants:
         available = {
@@ -375,7 +437,7 @@ def main() -> None:
     print(report)
     target_key = "-".join(str(value) for value in arguments.target_angles)
     seed_key = "-".join(str(value) for value in arguments.seeds)
-    method_key = "-".join(arguments.methods)
+    method_key = "-".join(methods)
     variant_key = "-".join(arguments.variants or ["all"])
     matrix_key = arguments.matrix or "diagnostic"
     summary_path = (

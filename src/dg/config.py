@@ -63,6 +63,8 @@ def _validate_endpoint_history_contract(config: dict[str, Any]) -> None:
         raise ValueError("Endpoint-history cells must be marked as factorial members.")
     if float(loss.get("interpolation_lambda", -1)) != 1.0:
         raise ValueError("Endpoint-history cells require interpolation lambda 1.")
+    if float(loss.get("endpoint_weight", 1.0)) != 1.0:
+        raise ValueError("Endpoint-history cells require endpoint weight 1.")
     if loss.get("endpoint_normalization", "none") != "none":
         raise ValueError("Endpoint-history cells do not normalize the endpoint loss.")
     if tuple(float(value) for value in loss.get("interpolation_weights", ())) != (
@@ -77,6 +79,76 @@ def _validate_endpoint_history_contract(config: dict[str, Any]) -> None:
             raise ValueError("Endpoint-history DGNT cells require fixed DGER weights.")
     if config.get("update_schedule") != "method_faithful":
         raise ValueError("Endpoint-history cells require method_faithful updates.")
+
+
+def _validate_endpoint_scale_contract(config: dict[str, Any]) -> None:
+    ablation = config["ablation"]
+    method = config["method"]
+    name = ablation.get("name")
+    if method in {"deepall", "dger"}:
+        expected_name = f"{method}_shared_control"
+        if name != expected_name or ablation.get("changed_knobs") != []:
+            raise ValueError(
+                f"Endpoint-scale {method} requires the unchanged {expected_name}."
+            )
+        if ablation.get("factorial_member") is not False:
+            raise ValueError("Endpoint-scale controls are not factorial members.")
+        if config.get("update_schedule") != "method_faithful":
+            raise ValueError("Endpoint-scale controls require method_faithful updates.")
+        if method == "dger":
+            alphas = tuple(float(config["loss"].get(key, -1)) for key in (
+                "dger_alpha_1", "dger_alpha_2", "dger_alpha_3",
+            ))
+            if alphas != (0.5, 0.005, 0.01):
+                raise ValueError("The DGER shared control requires fixed paper weights.")
+        return
+
+    cells = {}
+    for architecture_name, architecture in (
+        ("mlp", "mlp_3x64"), ("conv", "conv1d_3layer"),
+    ):
+        for weight_name, endpoint_weight in (
+            ("1", 1.0), ("1_over_8", 0.125),
+            ("1_over_64", 0.015625), ("0_01", 0.01),
+        ):
+            changed = []
+            if architecture == "mlp_3x64":
+                changed.append("loss.interpolation_mode")
+            if endpoint_weight != 1.0:
+                changed.append("loss.endpoint_weight")
+            cells[f"scale_{architecture_name}_{weight_name}"] = (
+                architecture, endpoint_weight, changed,
+            )
+    if name not in cells:
+        raise ValueError(f"{name!r} is not a recognized endpoint-scale cell.")
+    architecture, endpoint_weight, changed_knobs = cells[name]
+    loss = config["loss"]
+    if (
+        loss.get("interpolation_mode") != architecture
+        or loss.get("endpoint_loss") != "mean_sample_l2"
+        or float(loss.get("endpoint_weight", -1)) != endpoint_weight
+    ):
+        raise ValueError(f"{name} does not match its endpoint-scale settings.")
+    if ablation.get("changed_knobs") != changed_knobs:
+        raise ValueError(f"{name} requires changed_knobs={changed_knobs}.")
+    if ablation.get("factorial_member") is not True:
+        raise ValueError("Endpoint-scale cells must be factorial members.")
+    if float(loss.get("interpolation_lambda", -1)) != 1.0:
+        raise ValueError("Endpoint-scale cells require interpolation lambda 1.")
+    if loss.get("endpoint_normalization", "none") != "none":
+        raise ValueError("Endpoint-scale cells require raw L2 without normalization.")
+    if tuple(float(value) for value in loss.get("interpolation_weights", ())) != (
+        0.0, 0.25, 0.5, 0.75, 1.0,
+    ):
+        raise ValueError("Endpoint-scale cells require the fixed five-point grid.")
+    if config.get("update_schedule") != "method_faithful":
+        raise ValueError("Endpoint-scale cells require method_faithful updates.")
+    if method == "dgnt":
+        alphas = tuple(float(loss.get(key, -1)) for key in (
+            "dger_alpha_1", "dger_alpha_2", "dger_alpha_3",
+        ))
+        if alphas != (0.5, 0.005, 0.01):
+            raise ValueError("Endpoint-scale DGNT cells require fixed DGER weights.")
 
 
 def _validate_ablation_contract(config: dict[str, Any]) -> None:
@@ -94,6 +166,9 @@ def _validate_ablation_contract(config: dict[str, Any]) -> None:
     matrix = ablation.get("matrix")
     if matrix == "endpoint_history":
         _validate_endpoint_history_contract(config)
+        return
+    if matrix == "endpoint_scale":
+        _validate_endpoint_scale_contract(config)
         return
     if matrix is not None:
         raise ValueError(f"Unknown ablation matrix: {matrix!r}.")
@@ -146,6 +221,7 @@ def _validate_ablation_contract(config: dict[str, Any]) -> None:
                 "interpolator_residual": "residual",
             }.get(name, "learned"),
             "endpoint_loss": "mean_sample_l2",
+            "endpoint_weight": 1.0,
             "endpoint_normalization": (
                 "sqrt_latent" if name == "endpoint_sqrt" else "none"
             ),
@@ -154,6 +230,7 @@ def _validate_ablation_contract(config: dict[str, Any]) -> None:
             defaults = {
                 "interpolation_mode": "learned",
                 "endpoint_loss": "mean_sample_l2",
+                "endpoint_weight": 1.0,
                 "endpoint_normalization": "none",
             }
             default = defaults.get(key)
@@ -269,9 +346,13 @@ def validate_experiment_config(config: dict[str, Any]) -> None:
             endpoint_normalization = loss.get("endpoint_normalization", "none")
             if endpoint_normalization not in {"none", "sqrt_latent"}:
                 raise ValueError("Endpoint normalization must be none or sqrt_latent.")
+            endpoint_weight = float(loss.get("endpoint_weight", 1.0))
+            if not math.isfinite(endpoint_weight) or endpoint_weight < 0:
+                raise ValueError("Endpoint weight must be finite and nonnegative.")
             if not is_ablation and (
                 interpolation_mode not in {"learned", "conv1d_3layer"}
                 or endpoint_mode != "mean_sample_l2"
+                or endpoint_weight != 1.0
                 or endpoint_normalization != "none"
             ):
                 raise ValueError("Nonstandard interpolation settings require an explicit ablation.")

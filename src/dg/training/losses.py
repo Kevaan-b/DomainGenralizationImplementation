@@ -14,6 +14,7 @@ class InterpolationLoss:
     total: Tensor
     path: Tensor
     endpoint: Tensor
+    weighted_endpoint: Tensor
 
 
 def interpolation_path(start: Tensor, displacement: Tensor, weights: Iterable[float]) -> tuple[Tensor, ...]:
@@ -49,6 +50,7 @@ def interpolation_loss(
     interpolator: nn.Module, weights: Iterable[float],
     endpoint_normalization: str = "none",
     endpoint_loss_mode: str = "mean_sample_l2",
+    endpoint_weight: float = 1.0,
 ) -> InterpolationLoss:
     """Classify every prescribed path point and enforce endpoint consistency."""
     displacement = interpolator(end - start)
@@ -57,7 +59,13 @@ def interpolation_loss(
     endpoint = endpoint_loss(
         displacement, end - start, endpoint_normalization, endpoint_loss_mode,
     )
-    return InterpolationLoss(total=path + endpoint, path=path, endpoint=endpoint)
+    weighted_endpoint = float(endpoint_weight) * endpoint
+    return InterpolationLoss(
+        total=path + weighted_endpoint,
+        path=path,
+        endpoint=endpoint,
+        weighted_endpoint=weighted_endpoint,
+    )
 
 
 def class_balanced_cross_entropy(logits: Tensor, labels: Tensor, num_classes: int = 10) -> Tensor:
